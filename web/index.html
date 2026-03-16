@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>TLS104 Master - Windows Desktop</title>
+    <title>IEC 104 Master - Web 监控</title>
     <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css">
     <style>
         body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
@@ -25,18 +25,39 @@
             0% { background: #fdf6ec; }
             100% { background: transparent; }
         }
+        .point-row-changed { background: #fdf6ec !important; }
+        .search-input { width: 300px; }
+        .filter-select { width: 150px; }
     </style>
 </head>
 <body>
     <div id="app">
         <div class="header">
-            <h1>IEC 104 Master - Desktop</h1>
+            <h1>IEC 104 Master - Web 监控</h1>
             <el-button type="primary" @click="showAddDialog = true">添加从站</el-button>
+            <el-button type="warning" @click="openControlDialog({})">遥控</el-button>
+        </div>
+
+        <!-- 从站搜索 -->
+        <div style="margin-bottom: 16px; display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
+            <el-input
+                v-model="stationSearchText"
+                placeholder="搜索从站地址..."
+                clearable
+                style="width: 200px;">
+                <template #prefix>🔍</template>
+            </el-input>
+            <el-select v-model="stationStatusFilter" placeholder="全部状态" clearable style="width: 150px;">
+                <el-option label="已连接" value="connected"></el-option>
+                <el-option label="未连接" value="disconnected"></el-option>
+                <el-option label="连接中" value="connecting"></el-option>
+            </el-select>
+            <span style="color: #909399; font-size: 12px;">共 {{ filteredStations.length }} 个从站</span>
         </div>
 
         <!-- 从站列表 -->
         <el-row :gutter="16">
-            <el-col :span="8" v-for="station in stations" :key="station.station_id">
+            <el-col :span="8" v-for="station in filteredStations" :key="station.station_id">
                 <el-card class="station-card">
                     <template #header>
                         <div class="station-header">
@@ -49,16 +70,101 @@
                     </template>
                     <p>地址: {{ station.host }}:{{ station.port }}</p>
                     <p>状态: {{ station.status }}</p>
+                    <p v-if="station.tls_status">TLS: {{ station.tls_status }}</p>
                     <div style="margin-top: 12px;">
                         <el-button size="small" type="primary" @click="sendInterrogation(station.station_id)">总召唤</el-button>
+                        <el-button size="small" @click="sendCounterInterrogation(station.station_id)">累积量</el-button>
                         <el-button size="small" @click="sendClockSync(station.station_id)">时钟同步</el-button>
                     </div>
                 </el-card>
             </el-col>
         </el-row>
 
-        <div v-if="stations.length === 0" style="text-align: center; padding: 40px; color: #909399;">
-            暂无从站，请点击"添加从站"按钮添加
+        <!-- 智能点位展示 -->
+        <div style="margin-top: 20px;">
+            <h3>点位监控</h3>
+            <!-- 搜索和筛选 -->
+            <div style="margin-bottom: 16px; display: flex; gap: 12px; flex-wrap: wrap;">
+                <el-input
+                    v-model="searchText"
+                    placeholder="搜索IOA或类型..."
+                    clearable
+                    class="search-input">
+                    <template #prefix>🔍</template>
+                </el-input>
+                <el-select v-model="filterType" placeholder="全部类型" clearable class="filter-select">
+                    <el-option v-for="t in allTypes" :key="t" :label="getTypeName(t)" :value="t"></el-option>
+                </el-select>
+                <el-select v-model="filterQuality" placeholder="全部质量" clearable class="filter-select">
+                    <el-option label="正常" :value="0"></el-option>
+                    <el-option label="溢出" :value="1"></el-option>
+                    <el-option label="无效" :value="2"></el-option>
+                </el-select>
+                <el-button @click="refreshPoints">刷新</el-button>
+            </div>
+
+            <!-- 按子站分组的点位表格 -->
+            <div v-if="stationsWithData.length === 0" style="text-align: center; padding: 40px; color: #909399;">
+                暂无点位数据，请先添加从站并执行总召唤
+            </div>
+            <div v-else v-for="stationId in stationsWithData" :key="stationId" style="margin-bottom: 20px;">
+                <el-card>
+                    <template #header>
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span>
+                                <span class="status-dot" :class="'status-' + (stations.find(s => s.station_id === stationId)?.status || 'unknown')"></span>
+                                从站: {{ stationId }}
+                            </span>
+                            <el-button size="small" type="primary" @click="sendInterrogation(stationId)">总召唤</el-button>
+                        </div>
+                    </template>
+                    <el-table :data="pointsByStation[stationId]" height="250" style="width: 100%" :row-class-name="getRowClassName">
+                        <el-table-column prop="ioa" label="IOA" width="100" sortable></el-table-column>
+                        <el-table-column prop="type" label="类型" width="200" sortable>
+                            <template #default="scope">
+                                {{ getTypeName(scope.row.type) }}
+                            </template>
+                        </el-table-column>
+                        <el-table-column prop="value" label="值" width="150">
+                            <template #default="scope">
+                                <template v-if="isDigitalType(scope.row.type)">
+                                    <el-tag :type="scope.row.value === 1 ? 'success' : 'info'" size="large">
+                                        {{ scope.row.value === 1 ? 'ON' : 'OFF' }}
+                                    </el-tag>
+                                </template>
+                                <template v-else>
+                                    {{ formatTelemetryValue(scope.row.value, scope.row.type) }}
+                                </template>
+                            </template>
+                        </el-table-column>
+                        <el-table-column prop="quality" label="质量" width="100">
+                            <template #default="scope">
+                                <el-tag :type="getQualityType(scope.row.quality)" size="small">
+                                    {{ getQualityName(scope.row.quality) }}
+                                </el-tag>
+                            </template>
+                        </el-table-column>
+                        <el-table-column prop="timestamp" label="更新时间" width="180" sortable></el-table-column>
+                        <el-table-column label="操作" width="100" fixed="right">
+                            <template #default="scope">
+                                <el-button
+                                    v-if="scope.row.station_id && isDigitalType(scope.row.type)"
+                                    size="small"
+                                    type="warning"
+                                    @click="openControlDialog(scope.row)">
+                                    遥控
+                                </el-button>
+                            </template>
+                        </el-table-column>
+                    </el-table>
+                    <div style="margin-top: 8px; color: #909399; font-size: 12px;">
+                        共 {{ pointsByStation[stationId]?.length || 0 }} 个点位
+                    </div>
+                </el-card>
+            </div>
+            <div style="margin-top: 8px; color: #909399; font-size: 12px;">
+                共 {{ filteredPoints.length }} 个点位（已按子站分组显示）
+            </div>
         </div>
 
         <!-- 报文监控 -->
@@ -69,14 +175,24 @@
                     <el-button size="small" type="danger" @click="clearPackets">清空</el-button>
                 </div>
             </template>
-            <div class="packet-monitor" id="packetMonitor">
-                <div v-for="(packet, index) in packets" :key="index">
-                    <span :class="packet.sent ? 'packet-sent' : 'packet-received'">
-                        {{ packet.sent ? '→' : '←' }}
-                    </span>
-                    {{ packet.data }}
-                </div>
-            </div>
+            <el-collapse v-model="activeCollapse">
+                <el-collapse-item name="packets">
+                    <template #title>
+                        <div style="width: 100%; display: flex; justify-content: space-between; align-items: center; padding-right: 10px;">
+                            <span>{{ activeCollapse.includes('packets') ? '收起' : '展开' }}报文监控</span>
+                            <span style="color: #909399; font-size: 12px;">共 {{ packets.length }} 条</span>
+                        </div>
+                    </template>
+                    <div class="packet-monitor" id="packetMonitor">
+                        <div v-for="(packet, index) in packets" :key="index">
+                            <span :class="packet.sent ? 'packet-sent' : 'packet-received'">
+                                {{ packet.sent ? '→' : '←' }}
+                            </span>
+                            {{ packet.data }}
+                        </div>
+                    </div>
+                </el-collapse-item>
+            </el-collapse>
         </el-card>
 
         <!-- 添加从站对话框 -->
@@ -88,8 +204,20 @@
                 <el-form-item label="端口">
                     <el-input-number v-model="newStation.port" :min="1" :max="65535"></el-input-number>
                 </el-form-item>
+                <el-form-item label="公共地址(CA)">
+                    <el-input-number v-model="newStation.ca" :min="1" :max="65535"></el-input-number>
+                </el-form-item>
                 <el-form-item label="TLS">
                     <el-switch v-model="newStation.use_tls"></el-switch>
+                </el-form-item>
+                <el-form-item label="CA证书" v-if="newStation.use_tls">
+                    <el-input v-model="newStation.ca_file" placeholder="/path/to/ca.crt"></el-input>
+                </el-form-item>
+                <el-form-item label="客户端证书" v-if="newStation.use_tls">
+                    <el-input v-model="newStation.cert_file" placeholder="/path/to/client.crt"></el-input>
+                </el-form-item>
+                <el-form-item label="客户端密钥" v-if="newStation.use_tls">
+                    <el-input v-model="newStation.key_file" placeholder="/path/to/client.key"></el-input>
                 </el-form-item>
             </el-form>
             <template #footer>
@@ -97,25 +225,528 @@
                 <el-button type="primary" @click="addStation">确定</el-button>
             </template>
         </el-dialog>
+
+        <!-- 遥控对话框 -->
+        <el-dialog v-model="showControlDialog" title="遥控操作" width="450px">
+            <el-form :model="controlForm" label-width="80px">
+                <el-form-item label="从站">
+                    <el-select v-model="controlForm.stationId" placeholder="选择从站">
+                        <el-option
+                            v-for="station in stations"
+                            :key="station.station_id"
+                            :label="station.station_id"
+                            :value="station.station_id">
+                        </el-option>
+                    </el-select>
+                </el-form-item>
+                <el-form-item label="公共地址">
+                    <el-input-number v-model="controlForm.ca" :min="0" :max="65535"></el-input-number>
+                </el-form-item>
+                <el-form-item label="IOA">
+                    <el-input-number v-model="controlForm.ioa" :min="0" :max="16777215"></el-input-number>
+                </el-form-item>
+                <el-form-item label="控制类型">
+                    <el-select v-model="controlForm.type" placeholder="选择控制类型">
+                        <el-option label="单点遥控 (C_SC_NA_1) - 45" value="single"></el-option>
+                        <el-option label="双点遥控 (C_DC_NA_1) - 46" value="double"></el-option>
+                        <el-option label="步进调节 (C_RC_NA_1) - 47" value="step"></el-option>
+                        <el-option label="归一化调节 (C_SE_NA_1) - 48" value="normalized"></el-option>
+                        <el-option label="标度化调节 (C_SE_NB_1) - 49" value="scaled"></el-option>
+                        <el-option label="浮点调节 (C_SE_NC_1) - 50" value="float"></el-option>
+                        <el-option label="位串控制 (C_BO_NA_1) - 51" value="bitstring"></el-option>
+                    </el-select>
+                </el-form-item>
+                <!-- 遥控操作选择 -->
+                <el-form-item label="操作" v-if="['single', 'double', 'step'].includes(controlForm.type)">
+                    <el-radio-group v-model="controlForm.value">
+                        <el-radio :label="1" v-if="controlForm.type === 'single'">合闸 (SCS=1)</el-radio>
+                        <el-radio :label="0" v-if="controlForm.type === 'single'">分闸 (SCS=0)</el-radio>
+                        <el-radio :label="2" v-if="controlForm.type === 'double'">合闸 (DCS=2)</el-radio>
+                        <el-radio :label="1" v-if="controlForm.type === 'double'">分闸 (DCS=1)</el-radio>
+                        <el-radio :label="2" v-if="controlForm.type === 'step'">升 (TCS=2)</el-radio>
+                        <el-radio :label="1" v-if="controlForm.type === 'step'">降 (TCS=1)</el-radio>
+                    </el-radio-group>
+                </el-form-item>
+                <!-- 调节值输入 -->
+                <el-form-item label="调节值" v-if="['normalized', 'scaled', 'float'].includes(controlForm.type)">
+                    <el-input-number v-model="controlForm.value" :precision="3" :step="0.1"></el-input-number>
+                    <span style="margin-left: 10px; color: #909399;" v-if="controlForm.type === 'normalized'">(-1.0 ~ 1.0)</span>
+                    <span style="margin-left: 10px; color: #909399;" v-if="controlForm.type === 'scaled'">(-32768 ~ 32767)</span>
+                    <span style="margin-left: 10px; color: #909399;" v-if="controlForm.type === 'float'">浮点数</span>
+                </el-form-item>
+                <!-- 位串控制输入 -->
+                <el-form-item label="位串值" v-if="controlForm.type === 'bitstring'">
+                    <el-input v-model="controlForm.bitstring" placeholder="如: 0F 或 00001111"></el-input>
+                </el-form-item>
+                <el-form-item label="执行模式">
+                    <el-radio-group v-model="controlForm.select">
+                        <el-radio :label="false">直接执行</el-radio>
+                        <el-radio :label="true">选择执行 (先选择后执行)</el-radio>
+                    </el-radio-group>
+                </el-form-item>
+            </el-form>
+            <el-alert
+                title="确认遥控操作"
+                type="warning"
+                :closable="false"
+                show-icon>
+                将向从站 {{ controlForm.stationId }} (CA={{ controlForm.ca }}) 的 IOA={{ controlForm.ioa }} 发送 {{ controlForm.type === 'single' ? 'C_SC_NA_1 (45)' : controlForm.type === 'double' ? 'C_DC_NA_1 (46)' : controlForm.type === 'step' ? 'C_RC_NA_1 (47)' : controlForm.type === 'normalized' ? 'C_SE_NA_1 (48)' : controlForm.type === 'scaled' ? 'C_SE_NB_1 (49)' : controlForm.type === 'float' ? 'C_SE_NC_1 (50)' : 'C_BO_NA_1 (51)' }} {{ controlForm.select ? '选择' : '直接' }} 命令
+            </el-alert>
+            <template #footer>
+                <el-button @click="showControlDialog = false">取消</el-button>
+                <el-button type="primary" @click="sendControlCommand">确认发送</el-button>
+            </template>
+        </el-dialog>
     </div>
 
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://unpkg.com/element-plus"></script>
     <script>
-        const { createApp, ref } = Vue;
+        const { createApp, ref, computed, watch, onMounted, nextTick } = Vue;
+
+        // IEC 60870-5-104 类型映射（与 IEC104Type.h 保持一致）
+        const typeNames = {
+            'M_SP_NA_1': { name: '单点遥信 (M_SP_NA_1)', code: 1 },
+            'M_DP_NA_1': { name: '双点遥信 (M_DP_NA_1)', code: 3 },
+            'M_ME_NA_1': { name: '规一化值 (M_ME_NA_1)', code: 9 },
+            'M_ME_NB_1': { name: '标度化值 (M_ME_NB_1)', code: 11 },
+            'M_ME_NC_1': { name: '短浮点数 (M_ME_NC_1)', code: 13 },
+            'M_SP_TB_1': { name: '带时标单点遥信 (M_SP_TB_1)', code: 30 },
+            'M_DP_TB_1': { name: '带时标双点遥信 (M_DP_TB_1)', code: 31 },
+            'M_ME_TD_1': { name: '带时标规一化值 (M_ME_TD_1)', code: 34 },
+            'M_ME_TE_1': { name: '带时标标度化值 (M_ME_TE_1)', code: 35 },
+            'M_ME_TF_1': { name: '带时标短浮点数 (M_ME_TF_1)', code: 36 },
+        };
+
+        // 获取类型显示名称
+        function getTypeName(type) {
+            const info = typeNames[type];
+            if (info) {
+                return `${info.name} (${info.code})`;
+            }
+            return type;
+        }
+
+        // 格式化遥测值
+        function formatTelemetryValue(value, type) {
+            if (type === 'M_ME_NC_1' || type === 'M_ME_TF_1') {
+                return value.toFixed(2);
+            } else if (type === 'M_ME_NA_1' || type === 'M_ME_TD_1') {
+                // 归一化值转换为百分比
+                return (value / 327.67).toFixed(2);
+            }
+            return value.toString();
+        }
+
+        // 判断是否为遥信类型
+        function isDigitalType(type) {
+            return type.startsWith('M_SP_') || type.startsWith('M_DP_');
+        }
+
+        // 质量位名称映射
+        function getQualityName(quality) {
+            const names = { 0: '正常', 1: '溢出', 2: '无效' };
+            return names[quality] || '未知';
+        }
+
+        // 质量位标签类型
+        function getQualityType(quality) {
+            const types = { 0: 'success', 1: 'warning', 2: 'danger' };
+            return types[quality] || 'info';
+        }
+
+        // 遥信类型列表
+        const digitalTypes = ['M_SP_NA_1', 'M_DP_NA_1', 'M_SP_TB_1', 'M_DP_TB_1'];
 
         const app = createApp({
             setup() {
                 const stations = ref([]);
+                const pointsMap = ref(new Map());  // 统一使用 Map 存储点位，key 为 ioa
                 const packets = ref([]);
+                const packetCache = ref([]);  // 缓存折叠时的报文
+
+                // 报文监控是否展开
+                const isPacketMonitorOpen = computed(() => {
+                    return activeCollapse.value.includes('packets');
+                });
+
+                // 从站搜索和筛选
+                const stationSearchText = ref('');
+                const stationStatusFilter = ref('');
+
+                // 筛选后的从站列表
+                const filteredStations = computed(() => {
+                    let list = stations.value;
+
+                    // 地址搜索
+                    if (stationSearchText.value) {
+                        const s = stationSearchText.value.toLowerCase();
+                        list = list.filter(st =>
+                            st.station_id.toLowerCase().includes(s) ||
+                            st.host.toLowerCase().includes(s) ||
+                            st.port.toString().includes(s)
+                        );
+                    }
+
+                    // 状态筛选
+                    if (stationStatusFilter.value) {
+                        list = list.filter(st => st.status === stationStatusFilter.value);
+                    }
+
+                    return list;
+                });
+
+                // 搜索和筛选（带防抖）
+                const searchText = ref('');
+                const filterType = ref('');
+                const filterQuality = ref('');
+                const searchDebounceTimer = ref(null);
+
+                // 从站搜索防抖
+                const stationSearchDebounceTimer = ref(null);
+                function handleStationSearch(value) {
+                    clearTimeout(stationSearchDebounceTimer.value);
+                    stationSearchDebounceTimer.value = setTimeout(() => {
+                        stationSearchText.value = value;
+                    }, 300);
+                }
+
+                // 防抖搜索
+                function handleSearchInput(value) {
+                    clearTimeout(searchDebounceTimer.value);
+                    searchDebounceTimer.value = setTimeout(() => {
+                        searchText.value = value;
+                        currentPage.value = 1;  // 搜索时重置到第一页
+                    }, 300);
+                }
+
+                // 高亮行 ID 映射（Map 优化：O(1) 查找）
+                const highlightMap = ref(new Map());
+
+                // 生成唯一 ID
+                function makePointId(ioa, type) {
+                    return ioa + '_' + type;
+                }
+
+                // 添加高亮
+                function addHighlight(id) {
+                    if (!highlightMap.value.has(id)) {
+                        highlightMap.value.set(id, true);
+                        setTimeout(() => {
+                            highlightMap.value.delete(id);
+                        }, 3000);
+                    }
+                }
+
+                // 检查是否高亮
+                function isHighlighted(id) {
+                    return highlightMap.value.has(id);
+                }
+
+                // 按功能码分组的遥测数据
+                const telemetryByType = computed(() => {
+                    const groups = {};
+                    pointsMap.value.forEach(item => {
+                        const type = item.type;
+                        if (!groups[type]) {
+                            groups[type] = [];
+                        }
+                        groups[type].push(item);
+                    });
+                    // 按 IOA 排序
+                    Object.keys(groups).forEach(key => {
+                        groups[key].sort((a, b) => a.ioa - b.ioa);
+                    });
+                    return groups;
+                });
+
+                // 按功能码分组的遥信数据
+                const digitalByType = computed(() => {
+                    const groups = {};
+                    pointsMap.value.forEach(item => {
+                        const type = item.type;
+                        if (!groups[type]) {
+                            groups[type] = [];
+                        }
+                        groups[type].push(item);
+                    });
+                    // 按 IOA 排序
+                    Object.keys(groups).forEach(key => {
+                        groups[key].sort((a, b) => a.ioa - b.ioa);
+                    });
+                    return groups;
+                });
+
+                // 所有点位列表（从 Map 转换）
+                const allPoints = computed(() => {
+                    return Array.from(pointsMap.value.values());
+                });
+
+                // 所有类型列表
+                const allTypes = computed(() => {
+                    const types = new Set();
+                    pointsMap.value.forEach(p => types.add(p.type));
+                    return Array.from(types).sort();
+                });
+
+                // 分页状态
+                const currentPage = ref(1);
+                const pageSize = ref(100);
+                const totalPoints = computed(() => filteredPoints.value.length);
+
+                // 当前页的点位
+                const paginatedPoints = computed(() => {
+                    const start = (currentPage.value - 1) * pageSize.value;
+                    const end = start + pageSize.value;
+                    return filteredPoints.value.slice(start, end);
+                });
+
+                // 筛选后的点位
+                const filteredPoints = computed(() => {
+                    let list = allPoints.value;
+
+                    // 搜索过滤
+                    if (searchText.value) {
+                        const s = searchText.value.toLowerCase();
+                        list = list.filter(p =>
+                            p.ioa.toString().includes(s) ||
+                            getTypeName(p.type).toLowerCase().includes(s)
+                        );
+                    }
+
+                    // 类型筛选
+                    if (filterType.value) {
+                        list = list.filter(p => p.type === filterType.value);
+                    }
+
+                    // 质量筛选
+                    if (filterQuality.value !== '') {
+                        list = list.filter(p => p.quality === filterQuality.value);
+                    }
+
+                    // 按 IOA 排序
+                    list.sort((a, b) => a.ioa - b.ioa);
+                    return list;
+                });
+
+                // 按子站分组的数据
+                const pointsByStation = computed(() => {
+                    const groups = {};
+                    const list = filteredPoints.value;
+
+                    list.forEach(p => {
+                        const sid = p.station_id || 'unknown';
+                        if (!groups[sid]) {
+                            groups[sid] = [];
+                        }
+                        groups[sid].push(p);
+                    });
+
+                    // 按 station_id 排序
+                    Object.keys(groups).sort().forEach(key => {
+                        groups[key].sort((a, b) => a.ioa - b.ioa);
+                    });
+
+                    return groups;
+                });
+
+                // 获取有数据的子站列表
+                const stationsWithData = computed(() => {
+                    return Object.keys(pointsByStation.value).sort();
+                });
+
+                // 刷新点位
+                function refreshPoints() {
+                    // 触发响应式更新
+                }
+
+                // 获取行样式类名
+                function getRowClassName({ row }) {
+                    return row.id && isHighlighted(row.id) ? 'point-row-changed' : '';
+                }
+
+                const activeCollapse = ref([]);
+
+                // 监听报文监控展开状态，展开时加载缓存
+                watch(activeCollapse, (newVal) => {
+                    if (newVal.includes('packets') && packetCache.value.length > 0) {
+                        // 展开时将缓存的报文复制到显示数组
+                        packets.value = [...packetCache.value];
+                        nextTick(() => {
+                            const monitor = document.getElementById('packetMonitor');
+                            if (monitor) {
+                                monitor.scrollTop = monitor.scrollHeight;
+                            }
+                        });
+                    }
+                }, { deep: true });
+
                 const showAddDialog = ref(false);
                 const newStation = ref({
                     host: '127.0.0.1',
                     port: 2404,
-                    use_tls: false
+                    ca: 1,
+                    use_tls: false,
+                    ca_file: '',
+                    cert_file: '',
+                    key_file: ''
                 });
 
-                // C++ IPC bridge
+                // 控制相关变量
+                const showControlDialog = ref(false);
+                const controlTarget = ref(null);  // 当前控制的目标点位
+                const controlForm = ref({
+                    stationId: '',
+                    ca: 1,
+                    ioa: 0,
+                    type: 'single',  // single/double/step/normalized/scaled/float/bitstring
+                    value: 1,        // 操作值或调节值
+                    bitstring: '',   // 位串值
+                    select: false    // false=直接执行, true=选择执行
+                });
+
+                // 打开控制对话框
+                function openControlDialog(point) {
+                    point = point || {};
+                    controlTarget.value = point;
+                    // 默认选择第一个从站
+                    const defaultStation = stations.value.length > 0 ? stations.value[0].station_id : '';
+                    controlForm.value = {
+                        stationId: point.station_id || defaultStation,
+                        ca: 1,
+                        ioa: point.ioa || 0,
+                        type: 'single',
+                        value: 1,
+                        select: false
+                    };
+                    showControlDialog.value = true;
+                }
+
+                // 发送控制命令
+                async function sendControlCommand() {
+                    if (!controlForm.value.stationId) {
+                        ElMessage.warning('请选择从站');
+                        return;
+                    }
+
+                    const stationId = controlForm.value.stationId;
+
+                    // 验证输入
+                    if (!controlForm.value.type) {
+                        ElMessage.warning('请选择控制类型');
+                        return;
+                    }
+
+                    // 处理位串值
+                    let value = controlForm.value.value;
+                    if (controlForm.value.type === 'bitstring') {
+                        value = parseInt(controlForm.value.bitstring, 16) || 0;
+                    }
+
+                    // Send to C++ via WebView2
+                    sendToCpp('control', {
+                        station_id: stationId,
+                        ioa: controlForm.value.ioa,
+                        type: controlForm.value.type,
+                        value: value,
+                        ca: controlForm.value.ca,
+                        select: controlForm.value.select
+                    });
+
+                    ElMessage.success('控制命令已发送');
+                    showControlDialog.value = false;
+                }
+
+                // Connect to C++ via WebView2
+                function connectToCpp() {
+                    if (window.chrome && window.chrome.webview) {
+                        window.chrome.webview.addEventListener('message', (event) => {
+                            try {
+                                const msg = JSON.parse(event.data);
+                                handleMessage(msg);
+                            } catch (e) {
+                                console.error('Failed to parse message:', e);
+                            }
+                        });
+                        console.log('[JS] Connected to C++ via WebView2');
+                    } else {
+                        console.log('[JS] Running in browser mode (not WebView2)');
+                    }
+                }
+
+                function handleMessage(msg) {
+                    switch (msg.type) {
+                        case 'telemetry':
+                            msg.data.objects.forEach(obj => {
+                                obj.timestamp = new Date().toLocaleString();
+                                obj.station_id = msg.station_id;  // 添加 station_id
+                                const key = msg.station_id + '_' + obj.ioa.toString();  // 使用 station_id + ioa 作为 key
+                                if (pointsMap.value.has(key)) {
+                                    const point = pointsMap.value.get(key);
+                                    // 值变化时添加高亮
+                                    if (point.value !== obj.value) {
+                                        addHighlight(key);
+                                    }
+                                    point.value = obj.value;
+                                    point.type = obj.type;
+                                    point.quality = obj.quality;
+                                    point.timestamp = obj.timestamp;
+                                } else {
+                                    pointsMap.value.set(key, {...obj, id: key});
+                                }
+                            });
+                            break;
+                        case 'digital':
+                            msg.data.objects.forEach(obj => {
+                                obj.timestamp = new Date().toLocaleString();
+                                obj.station_id = msg.station_id;  // 添加 station_id
+                                const key = msg.station_id + '_' + obj.ioa.toString();  // 使用 station_id + ioa 作为 key
+                                if (pointsMap.value.has(key)) {
+                                    const point = pointsMap.value.get(key);
+                                    // 值变化时添加高亮
+                                    if (point.value !== obj.value) {
+                                        addHighlight(key);
+                                    }
+                                    point.value = obj.value;
+                                    point.type = obj.type;
+                                    point.quality = obj.quality;
+                                    point.timestamp = obj.timestamp;
+                                } else {
+                                    pointsMap.value.set(key, {...obj, id: key});
+                                }
+                            });
+                            break;
+                        case 'connection':
+                            const station = stations.value.find(s => s.station_id === msg.station_id);
+                            if (station) {
+                                station.status = msg.data.status;
+                            }
+                            break;
+                        case 'packet':
+                            // 折叠时不处理DOM，只缓存
+                            if (isPacketMonitorOpen.value) {
+                                packets.value.push(msg.data);
+                                if (packets.value.length > 500) {
+                                    packets.value.shift();
+                                }
+                                nextTick(() => {
+                                    const monitor = document.getElementById('packetMonitor');
+                                    if (monitor) {
+                                        monitor.scrollTop = monitor.scrollHeight;
+                                    }
+                                });
+                            } else {
+                                // 折叠状态：只缓存，不渲染
+                                packetCache.value.push(msg.data);
+                                if (packetCache.value.length > 500) {
+                                    packetCache.value.shift();
+                                }
+                            }
+                            break;
+                    }
+                }
+
+                // Send message to C++ via WebView2
                 const sendToCpp = (type, data) => {
                     const msg = JSON.stringify({ type, data });
                     if (window.chrome && window.chrome.webview) {
@@ -125,60 +756,118 @@
                     }
                 };
 
-                const addStation = () => {
+                // Local station state (no server needed)
+                async function loadStations() {
+                    // Stations are managed locally via WebView2
+                    // Just ensure we have the correct format
+                }
+
+                async function addStation() {
+                    // Add to local list
+                    const stationId = `${newStation.value.host}:${newStation.value.port}`;
                     stations.value.push({
-                        station_id: `${newStation.value.host}:${newStation.value.port}`,
+                        station_id: stationId,
                         host: newStation.value.host,
                         port: newStation.value.port,
-                        status: 'connecting'
+                        status: 'connecting',
+                        use_tls: newStation.value.use_tls,
+                        ca: newStation.value.ca || 1
                     });
-                    sendToCpp('add_station', newStation.value);
+
+                    // Send to C++
+                    sendToCpp('add_station', {
+                        host: newStation.value.host,
+                        port: newStation.value.port,
+                        use_tls: newStation.value.use_tls,
+                        ca_file: newStation.value.ca_file || '',
+                        cert_file: newStation.value.cert_file || '',
+                        key_file: newStation.value.key_file || '',
+                        ca: newStation.value.ca || 1
+                    });
+
                     showAddDialog.value = false;
-                };
-
-                const removeStation = (id) => {
-                    stations.value = stations.value.filter(s => s.station_id !== id);
-                    sendToCpp('remove_station', { station_id: id });
-                };
-
-                const sendInterrogation = (id) => {
-                    sendToCpp('interrogation', { station_id: id });
-                };
-
-                const sendClockSync = (id) => {
-                    sendToCpp('clock_sync', { station_id: id });
-                };
-
-                const clearPackets = () => {
-                    packets.value = [];
-                };
-
-                // Listen for messages from C++
-                if (window.chrome && window.chrome.webview) {
-                    window.chrome.webview.addEventListener('message', (event) => {
-                        const msg = JSON.parse(event.data);
-                        console.log('[JS] Received:', msg);
-
-                        if (msg.type === 'connection') {
-                            const station = stations.value.find(s => s.station_id === msg.station_id);
-                            if (station) {
-                                station.status = msg.data.status;
-                            }
-                        } else if (msg.type === 'packet') {
-                            packets.value.push(msg.data);
-                            if (packets.value.length > 500) packets.value.shift();
-                        }
-                    });
                 }
+
+                async function removeStation(stationId) {
+                    stations.value = stations.value.filter(s => s.station_id !== stationId);
+                    sendToCpp('remove_station', { station_id: stationId });
+                }
+
+                async function sendInterrogation(stationId) {
+                    sendToCpp('interrogation', { station_id: stationId });
+                }
+
+                async function sendClockSync(stationId) {
+                    sendToCpp('clock_sync', { station_id: stationId });
+                }
+
+                async function sendCounterInterrogation(stationId) {
+                    sendToCpp('counter_interrogation', { station_id: stationId });
+                }
+
+                // 分页处理
+                function handlePageChange(page) {
+                    currentPage.value = page;
+                }
+                function handlePageSizeChange(size) {
+                    pageSize.value = size;
+                    currentPage.value = 1;  // 重置到第一页
+                }
+
+                function clearPackets() {
+                    packets.value = [];
+                }
+
+                onMounted(() => {
+                    loadStations();
+                    connectToCpp();
+                });
 
                 return {
                     stations,
+                    filteredStations,
+                    stationSearchText,
+                    stationStatusFilter,
+                    handleStationSearch,
+                    pointsMap,
+                    telemetryByType,
+                    digitalByType,
+                    allPoints,
+                    allTypes,
+                    filteredPoints,
+                    pointsByStation,
+                    stationsWithData,
+                    paginatedPoints,
+                    currentPage,
+                    pageSize,
+                    totalPoints,
+                    handlePageChange,
+                    handlePageSizeChange,
+                    searchText,
+                    handleSearchInput,
+                    filterType,
+                    filterQuality,
                     packets,
+                    activeCollapse,
                     showAddDialog,
+                    showControlDialog,
+                    controlTarget,
+                    controlForm,
+                    openControlDialog,
+                    sendControlCommand,
                     newStation,
+                    getTypeName,
+                    formatTelemetryValue,
+                    isDigitalType,
+                    getQualityName,
+                    getQualityType,
+                    refreshPoints,
+                    getRowClassName,
+                    isHighlighted,
                     addStation,
                     removeStation,
                     sendInterrogation,
+                    sendCounterInterrogation,
                     sendClockSync,
                     clearPackets
                 };

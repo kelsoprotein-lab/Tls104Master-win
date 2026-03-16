@@ -55,6 +55,7 @@ set(SOURCES
     src/platform/socket.cpp
     src/ipc/bridge.cpp
     src/http/server.cpp
+    src/iec104/connection.cpp
 )
 
 # Headers
@@ -62,6 +63,7 @@ set(HEADERS
     src/platform/socket.h
     src/ipc/bridge.h
     src/http/server.h
+    src/iec104/connection.h
 )
 
 # Create executable
