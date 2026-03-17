@@ -101,12 +101,12 @@ public:
     /**
      * @brief Send telemetry data to JS
      */
-    void sendTelemetry(const std::string& stationId, const std::vector<std::map<std::string, auto>>& points);
+    void sendTelemetry(const std::string& stationId, int ioa, const std::string& type, double value, int quality);
 
     /**
      * @brief Send digital data to JS
      */
-    void sendDigital(const std::string& stationId, const std::vector<std::map<std::string, auto>>& points);
+    void sendDigital(const std::string& stationId, int ioa, const std::string& type, int value, int quality);
 
     /**
      * @brief Send connection status to JS

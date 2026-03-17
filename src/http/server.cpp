@@ -1,6 +1,6 @@
 /**
  * @file server.cpp
- * @brief Simple HTTP server implementation
+ * @brief Simple HTTP server implementation with API support
  */
 
 #include "server.h"
@@ -19,7 +19,7 @@
 namespace tls104 {
 
 HttpServer::HttpServer(int port)
-    : port_(port), serverFd_(SOCKET_INVALID), running_(false), documentRoot_("./web") {
+    : port_(port), serverFd_(0), running_(false), documentRoot_("./web"), apiHandler_(nullptr) {
 }
 
 HttpServer::~HttpServer() {
@@ -34,7 +34,7 @@ bool HttpServer::start() {
         return false;
     }
 
-    serverFd_ = socketCreate();
+    serverFd_ = socket(AF_INET, SOCK_STREAM, 0);
     if (!socketIsValid(serverFd_)) {
         std::cerr << "[HTTP] Failed to create socket" << std::endl;
         return false;
@@ -58,14 +58,14 @@ bool HttpServer::start() {
     if (bind(serverFd_, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         std::cerr << "[HTTP] Failed to bind to port " << port_ << std::endl;
         socketClose(serverFd_);
-        serverFd_ = SOCKET_INVALID;
+        serverFd_ = 0;
         return false;
     }
 
     if (listen(serverFd_, 5) < 0) {
         std::cerr << "[HTTP] Failed to listen" << std::endl;
         socketClose(serverFd_);
-        serverFd_ = SOCKET_INVALID;
+        serverFd_ = 0;
         return false;
     }
 
@@ -84,7 +84,7 @@ void HttpServer::stop() {
     // Close server socket to unblock accept
     if (socketIsValid(serverFd_)) {
         socketClose(serverFd_);
-        serverFd_ = SOCKET_INVALID;
+        serverFd_ = 0;
     }
 
     if (acceptThread_.joinable()) {
@@ -94,6 +94,15 @@ void HttpServer::stop() {
 
 void HttpServer::setDocumentRoot(const std::string& root) {
     documentRoot_ = root;
+}
+
+void HttpServer::setAPIHandler(HttpHandler handler) {
+    apiHandler_ = handler;
+}
+
+void HttpServer::broadcast(const std::string& json) {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    messageQueue_.push(json);
 }
 
 void HttpServer::acceptLoop() {
@@ -127,47 +136,128 @@ void HttpServer::handleClient(int clientFd) {
     std::string method, path, version;
     iss >> method >> path >> version;
 
+    // Get request body if present
+    std::string body;
+    size_t bodyPos = request.find("\r\n\r\n");
+    if (bodyPos != std::string::npos) {
+        body = request.substr(bodyPos + 4);
+    }
+
     // Default to index.html
     if (path == "/") {
         path = "/index.html";
     }
 
-    // Read file
-    std::string fullPath = documentRoot_ + path;
-    std::string content = readFile(fullPath);
+    std::string response;
 
-    // Build response
-    std::ostringstream response;
-    std::string contentType = getContentType(path);
+    // Handle API requests
+    if (path.find("/api/") == 0 && apiHandler_) {
+        response = handleAPI(path, method, body);
+    } else if (path == "/events") {
+        // Server-Sent Events endpoint
+        std::string responseBody = "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: keep-alive\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "\r\n";
 
-    if (!content.empty()) {
-        response << "HTTP/1.1 200 OK\r\n";
-        response << "Content-Type: " << contentType << "\r\n";
-        response << "Content-Length: " << content.size() << "\r\n";
-        response << "Connection: close\r\n";
-        response << "\r\n";
-        response << content;
+        send(clientFd, responseBody.c_str(), responseBody.size(), 0);
+
+        // Keep connection open and send events
+        time_t lastCheck = time(nullptr);
+        while (running_) {
+            // Check for new messages every second
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            std::lock_guard<std::mutex> lock(queueMutex_);
+            while (!messageQueue_.empty()) {
+                std::string msg = "data: " + messageQueue_.front() + "\r\n\r\n";
+                messageQueue_.pop();
+                send(clientFd, msg.c_str(), msg.size(), 0);
+            }
+        }
+        return;
     } else {
-        std::string notFound = "<html><body><h1>404 Not Found</h1></body></html>";
-        response << "HTTP/1.1 404 Not Found\r\n";
-        response << "Content-Type: text/html\r\n";
-        response << "Content-Length: " << notFound.size() << "\r\n";
-        response << "Connection: close\r\n";
-        response << "\r\n";
-        response << notFound;
+        // Static file
+        std::string fullPath = documentRoot_ + path;
+        std::string content = readFile(fullPath);
+
+        std::string contentType = getContentType(path);
+
+        if (!content.empty()) {
+            std::ostringstream resp;
+            resp << "HTTP/1.1 200 OK\r\n";
+            resp << "Content-Type: " << contentType << "\r\n";
+            resp << "Content-Length: " << content.size() << "\r\n";
+            resp << "Access-Control-Allow-Origin: *\r\n";
+            resp << "Connection: close\r\n";
+            resp << "\r\n";
+            resp << content;
+            response = resp.str();
+        } else {
+            std::string notFound = "<html><body><h1>404 Not Found</h1></body></html>";
+            std::ostringstream resp;
+            resp << "HTTP/1.1 404 Not Found\r\n";
+            resp << "Content-Type: text/html\r\n";
+            resp << "Content-Length: " << notFound.size() << "\r\n";
+            resp << "Access-Control-Allow-Origin: *\r\n";
+            resp << "Connection: close\r\n";
+            resp << "\r\n";
+            resp << notFound;
+            response = resp.str();
+        }
     }
 
-    std::string responseStr = response.str();
-    send(clientFd, responseStr.c_str(), responseStr.size(), 0);
+    if (!response.empty()) {
+        send(clientFd, response.c_str(), response.size(), 0);
+    }
+}
+
+std::string HttpServer::handleAPI(const std::string& path, const std::string& method, const std::string& body) {
+    if (apiHandler_) {
+        return apiHandler_(path, method, body);
+    }
+
+    // Default response
+    return "HTTP/1.1 200 OK\r\n"
+           "Content-Type: application/json\r\n"
+           "Content-Length: 2\r\n"
+           "Access-Control-Allow-Origin: *\r\n"
+           "\r\n"
+           "{}";
 }
 
 std::string HttpServer::readFile(const std::string& path) const {
+    // Try different path formats
     std::ifstream file(path, std::ios::binary);
-    if (!file) return "";
+    if (!file) {
+        // Try with backslash
+        std::string altPath = path;
+        std::replace(altPath.begin(), altPath.end(), '/', '\\');
+        file.open(altPath, std::ios::binary);
+        if (!file) {
+            std::cerr << "[HTTP] Failed to open: " << path << " or " << altPath << std::endl;
+            return "";
+        }
+    }
 
-    std::ostringstream ss;
-    ss << file.rdbuf();
-    return ss.str();
+    // Get file size
+    file.seekg(0, std::ios::end);
+    size_t size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::cerr << "[HTTP] File size: " << size << std::endl;
+
+    std::string content(size, '\0');
+    file.read(&content[0], size);
+
+    if (!file) {
+        std::cerr << "[HTTP] Failed to read file" << std::endl;
+        return "";
+    }
+
+    return content;
 }
 
 std::string HttpServer::getContentType(const std::string& path) const {

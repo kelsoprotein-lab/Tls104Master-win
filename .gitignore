@@ -35,3 +35,14 @@ go.sum
 # OS
 .DS_Store
 Thumbs.db
+
+# ./cache
+.cache/
+
+# openspec
+openspec/
+.claude/
+.codex/
+.cursor/
+.gemini/
+.iflow/

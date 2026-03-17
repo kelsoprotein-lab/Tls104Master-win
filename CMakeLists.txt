@@ -10,7 +10,7 @@ if(WIN32)
     add_definitions(-D_WIN32_WINNT=0x0601)
     add_definitions(-DNOMINMAX)
     add_definitions(-D_CRT_SECURE_NO_WARNINGS)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall")
 else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
 endif()
@@ -20,6 +20,14 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 
 # Find packages
 find_package(Threads REQUIRED)
+
+# mbedtls include path (if installed)
+if(WIN32)
+    set(MBEDTLS_INCLUDE "C:/Program Files (x86)/Mbed TLS/include")
+    if(EXISTS ${MBEDTLS_INCLUDE})
+        message(STATUS "Found mbedtls at: ${MBEDTLS_INCLUDE}")
+    endif()
+endif()
 
 # WebView2 (Windows only)
 if(WIN32)
@@ -36,6 +44,10 @@ set(BUILD_COMMON ON CACHE BOOL "Build common code" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "Build tests" FORCE)
 set(WITH_MBEDTLS ON CACHE BOOL "Enable mbedTLS support" FORCE)
+
+# mbedtls paths - set BEFORE fetching lib60870
+set(MBEDTLS_ROOT "C:/Program Files (x86)/Mbed TLS")
+set(CMAKE_INCLUDE_PATH "${MBEDTLS_ROOT}/include;${CMAKE_INCLUDE_PATH}")
 
 # Download lib60870
 include(FetchContent)

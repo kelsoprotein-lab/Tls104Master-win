@@ -4,6 +4,7 @@
  */
 
 #include "bridge.h"
+#include "../platform/socket.h"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -168,31 +169,35 @@ std::string IPCBridge::buildJSON(JSMsgType type, const std::string& stationId, c
     return o.str();
 }
 
-void IPCBridge::sendTelemetry(const std::string& stationId, const std::vector<std::map<std::string, auto>>& points) {
+void IPCBridge::sendTelemetry(const std::string& stationId, int ioa, const std::string& type, double value, int quality) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!sendToJS_) return;
 
     std::ostringstream o;
     o << "{\"objects\":[";
-    for (size_t i = 0; i < points.size(); i++) {
-        if (i > 0) o << ",";
-        o << "{\"ioa\":" << points[i].at("ioa")
-          << ",\"type\":\"" << escapeJSON(std::string(points[i].at("type")))
-          << "\",\"value\":" << points[i].at("value")
-          << ",\"quality\":" << points[i].at("quality") << "}";
-    }
+    o << "{\"ioa\":" << ioa
+      << ",\"type\":\"" << escapeJSON(type)
+      << "\",\"value\":" << value
+      << ",\"quality\":" << quality << "}";
     o << "]}";
 
     std::string json = buildJSON(JSMsgType::TELEMETRY_DATA, stationId, o.str());
     sendToJS_(json);
 }
 
-void IPCBridge::sendDigital(const std::string& stationId, const std::vector<std::map<std::string, auto>>& points) {
+void IPCBridge::sendDigital(const std::string& stationId, int ioa, const std::string& type, int value, int quality) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!sendToJS_) return;
 
-    // Similar to sendTelemetry
-    std::string json = buildJSON(JSMsgType::DIGITAL_DATA, stationId, "{}");
+    std::ostringstream o;
+    o << "{\"objects\":[";
+    o << "{\"ioa\":" << ioa
+      << ",\"type\":\"" << escapeJSON(type)
+      << "\",\"value\":" << value
+      << ",\"quality\":" << quality << "}";
+    o << "]}";
+
+    std::string json = buildJSON(JSMsgType::DIGITAL_DATA, stationId, o.str());
     sendToJS_(json);
 }
 
