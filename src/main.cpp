@@ -194,7 +194,7 @@ std::string handleAPIRequest(const std::string& path, const std::string& method,
 
     // DELETE /api/stations/:id - remove station
     if (method == "DELETE" && path.find("/api/stations/") == 0) {
-        std::string stationId = path.substr(15); // Remove "/api/stations/"
+        std::string stationId = path.substr(14); // Remove "/api/stations/"
 
         if (g_appCallback) {
             g_appCallback->onRemoveStation(stationId);
@@ -210,7 +210,7 @@ std::string handleAPIRequest(const std::string& path, const std::string& method,
 
     // POST /api/stations/:id/interrogation
     if (method == "POST" && path.find("/api/stations/") == 0 && path.find("/interrogation") != std::string::npos) {
-        std::string stationId = path.substr(15, path.find("/", 15) - 15);
+        std::string stationId = path.substr(14, path.find("/", 14) - 14);
 
         if (g_appCallback) {
             g_appCallback->onSendInterrogation(stationId, 1);
@@ -226,7 +226,7 @@ std::string handleAPIRequest(const std::string& path, const std::string& method,
 
     // POST /api/stations/:id/clock-sync
     if (method == "POST" && path.find("/api/stations/") == 0 && path.find("/clock-sync") != std::string::npos) {
-        std::string stationId = path.substr(15, path.find("/", 15) - 15);
+        std::string stationId = path.substr(14, path.find("/", 14) - 14);
 
         if (g_appCallback) {
             g_appCallback->onSendClockSync(stationId, 1);
@@ -242,7 +242,7 @@ std::string handleAPIRequest(const std::string& path, const std::string& method,
 
     // POST /api/stations/:id/counter
     if (method == "POST" && path.find("/api/stations/") == 0 && path.find("/counter") != std::string::npos) {
-        std::string stationId = path.substr(15, path.find("/", 15) - 15);
+        std::string stationId = path.substr(14, path.find("/", 14) - 14);
 
         if (g_appCallback) {
             g_appCallback->onSendCounterRead(stationId, 1);
