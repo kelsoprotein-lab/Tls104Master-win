@@ -302,7 +302,7 @@
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <script src="https://unpkg.com/element-plus"></script>
     <script>
-        const { createApp, ref, computed, watch, onMounted, nextTick } = Vue;
+        const { createApp, ref, shallowRef, computed, watch, onMounted, nextTick } = Vue;
 
         // IEC 60870-5-104 类型映射（与 IEC104Type.h 保持一致）
         const typeNames = {
@@ -361,7 +361,7 @@
         const app = createApp({
             setup() {
                 const stations = ref([]);
-                const pointsMap = ref(new Map());  // 统一使用 Map 存储点位，key 为 ioa
+                const pointsMap = shallowRef({});  // 使用 shallowRef 存储点位，key 为 station_id + ioa
                 const packets = ref([]);
                 const packetCache = ref([]);  // 缓存折叠时的报文
 
@@ -446,7 +446,7 @@
                 // 按功能码分组的遥测数据
                 const telemetryByType = computed(() => {
                     const groups = {};
-                    pointsMap.value.forEach(item => {
+                    Object.values(pointsMap.value).forEach(item => {
                         const type = item.type;
                         if (!groups[type]) {
                             groups[type] = [];
@@ -463,7 +463,7 @@
                 // 按功能码分组的遥信数据
                 const digitalByType = computed(() => {
                     const groups = {};
-                    pointsMap.value.forEach(item => {
+                    Object.values(pointsMap.value).forEach(item => {
                         const type = item.type;
                         if (!groups[type]) {
                             groups[type] = [];
@@ -477,15 +477,15 @@
                     return groups;
                 });
 
-                // 所有点位列表（从 Map 转换）
+                // 所有点位列表
                 const allPoints = computed(() => {
-                    return Array.from(pointsMap.value.values());
+                    return Object.values(pointsMap.value);
                 });
 
                 // 所有类型列表
                 const allTypes = computed(() => {
                     const types = new Set();
-                    pointsMap.value.forEach(p => types.add(p.type));
+                    Object.values(pointsMap.value).forEach(p => types.add(p.type));
                     return Array.from(types).sort();
                 });
 
@@ -670,19 +670,38 @@
                         });
                         console.log('[JS] Connected to C++ via WebView2');
                     } else {
-                        console.log('[JS] Running in browser mode (not WebView2)');
+                        console.log('[JS] Running in browser mode (not WebView2), connecting to SSE...');
+                        // Connect to SSE for real-time updates
+                        const eventSource = new EventSource('/events');
+                        eventSource.onopen = () => {
+                            console.log('[JS] SSE connected');
+                        };
+                        eventSource.onmessage = (event) => {
+                            console.log('[JS] SSE message received:', event.data);
+                            try {
+                                const msg = JSON.parse(event.data);
+                                console.log('[JS] Parsed message:', msg);
+                                handleMessage(msg);
+                            } catch (e) {
+                                console.error('[JS] Failed to parse SSE message:', e);
+                            }
+                        };
+                        eventSource.onerror = () => {
+                            console.log('[JS] SSE connection error, retrying...');
+                        };
                     }
                 }
 
                 function handleMessage(msg) {
+                    let needsRefresh = false;
                     switch (msg.type) {
                         case 'telemetry':
                             msg.data.objects.forEach(obj => {
                                 obj.timestamp = new Date().toLocaleString();
                                 obj.station_id = msg.station_id;  // 添加 station_id
                                 const key = msg.station_id + '_' + obj.ioa.toString();  // 使用 station_id + ioa 作为 key
-                                if (pointsMap.value.has(key)) {
-                                    const point = pointsMap.value.get(key);
+                                if (key in pointsMap.value) {
+                                    const point = pointsMap.value[key];
                                     // 值变化时添加高亮
                                     if (point.value !== obj.value) {
                                         addHighlight(key);
@@ -692,7 +711,8 @@
                                     point.quality = obj.quality;
                                     point.timestamp = obj.timestamp;
                                 } else {
-                                    pointsMap.value.set(key, {...obj, id: key});
+                                    pointsMap.value[key] = {...obj, id: key};
+                                    needsRefresh = true;
                                 }
                             });
                             break;
@@ -701,8 +721,8 @@
                                 obj.timestamp = new Date().toLocaleString();
                                 obj.station_id = msg.station_id;  // 添加 station_id
                                 const key = msg.station_id + '_' + obj.ioa.toString();  // 使用 station_id + ioa 作为 key
-                                if (pointsMap.value.has(key)) {
-                                    const point = pointsMap.value.get(key);
+                                if (key in pointsMap.value) {
+                                    const point = pointsMap.value[key];
                                     // 值变化时添加高亮
                                     if (point.value !== obj.value) {
                                         addHighlight(key);
@@ -712,14 +732,19 @@
                                     point.quality = obj.quality;
                                     point.timestamp = obj.timestamp;
                                 } else {
-                                    pointsMap.value.set(key, {...obj, id: key});
+                                    pointsMap.value[key] = {...obj, id: key};
+                                    needsRefresh = true;
                                 }
                             });
                             break;
                         case 'connection':
+                            console.log('[JS] Connection update:', msg.station_id, msg.data);
                             const station = stations.value.find(s => s.station_id === msg.station_id);
                             if (station) {
                                 station.status = msg.data.status;
+                                console.log('[JS] Station status updated to:', msg.data.status);
+                            } else {
+                                console.log('[JS] Station not found in list:', msg.station_id);
                             }
                             break;
                         case 'packet':
@@ -744,22 +769,72 @@
                             }
                             break;
                     }
+                    // 触发响应式更新
+                    if (needsRefresh) {
+                        pointsMap.value = {...pointsMap.value};
+                    }
                 }
 
-                // Send message to C++ via WebView2
-                const sendToCpp = (type, data) => {
+                // Send message to C++ via WebView2 or HTTP API
+                const sendToCpp = async (type, data) => {
                     const msg = JSON.stringify({ type, data });
                     if (window.chrome && window.chrome.webview) {
                         window.chrome.webview.postMessage(msg);
                     } else {
-                        console.log('[JS] Would send:', msg);
+                        // Browser mode: use HTTP API
+                        console.log('[JS] Browser mode, calling API for:', type);
+                        try {
+                            if (type === 'add_station') {
+                                const response = await fetch('/api/stations', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({
+                                        host: data.host,
+                                        port: data.port,
+                                        use_tls: data.use_tls || false
+                                    })
+                                });
+                                const result = await response.json();
+                                console.log('[JS] Add station result:', result);
+                            } else if (type === 'remove_station') {
+                                await fetch('/api/stations/' + data.station_id, { method: 'DELETE' });
+                            } else if (type === 'interrogation') {
+                                await fetch('/api/stations/' + data.station_id + '/interrogation', { method: 'POST' });
+                            } else if (type === 'clock_sync') {
+                                await fetch('/api/stations/' + data.station_id + '/clock-sync', { method: 'POST' });
+                            } else if (type === 'counter_interrogation') {
+                                await fetch('/api/stations/' + data.station_id + '/counter', { method: 'POST' });
+                            } else if (type === 'control') {
+                                // Control command - POST to API
+                                await fetch('/api/stations/' + data.station_id + '/control', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify(data)
+                                });
+                            }
+                        } catch (e) {
+                            console.error('[JS] API call failed:', e);
+                        }
                     }
                 };
 
-                // Local station state (no server needed)
+                // Load stations from server
                 async function loadStations() {
-                    // Stations are managed locally via WebView2
-                    // Just ensure we have the correct format
+                    if (window.chrome && window.chrome.webview) {
+                        // WebView2 mode - stations come via messages
+                    } else {
+                        // Browser mode - fetch from API
+                        try {
+                            const response = await fetch('/api/stations');
+                            const result = await response.json();
+                            if (result.code === 0 && result.data) {
+                                stations.value = result.data;
+                                console.log('[JS] Loaded stations:', stations.value);
+                            }
+                        } catch (e) {
+                            console.error('[JS] Failed to load stations:', e);
+                        }
+                    }
                 }
 
                 async function addStation() {

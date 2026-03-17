@@ -14,17 +14,54 @@ static thread_local std::string g_currentStationId;
 
 namespace tls104 {
 
-IEC104ConnectionManager::IEC104ConnectionManager() {
-    // Initialize TLS
-#if defined(LIB60870_HAS_TLS_SUPPORT)
-    g_tlsConfig = TLSConfiguration_create();
-    if (g_tlsConfig) {
-        TLSConfiguration_setClientMode(g_tlsConfig);
-        TLSConfiguration_setChainValidation(g_tlsConfig, true);
-        TLSConfiguration_setAllowOnlyKnownCertificates(g_tlsConfig, false);
-        std::cout << "[IEC104] TLS initialized successfully" << std::endl;
+// Helper function to extract timestamp from CP56Time2a (7-byte time)
+// Returns milliseconds since epoch
+static uint64_t extractCP56Timestamp(CP56Time2a ts) {
+    if (ts == nullptr) {
+        return 0;
     }
-#endif
+    // CP56Time2a_toMsTimestamp converts to milliseconds since epoch
+    return CP56Time2a_toMsTimestamp(ts);
+}
+
+// Helper function to extract timestamp from CP24Time2a (3-byte time)
+// CP24Time2a contains: milliseconds (0-1), minutes (2), so no hour info
+// We use current time as base and adjust for minutes
+static uint64_t extractCP24Timestamp(CP24Time2a ts) {
+    if (ts == nullptr) {
+        return 0;
+    }
+
+    int ms = CP24Time2a_getMillisecond(ts);
+    int minute = CP24Time2a_getMinute(ts);
+
+    // Get current time as base
+    auto now = std::chrono::system_clock::now();
+    auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now.time_since_epoch()).count();
+
+    // Get current time components
+    std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm* tmNow = std::localtime(&nowTime);
+
+    // Calculate minute difference and adjust
+    int currentMinute = tmNow->tm_min;
+    int minuteDiff = minute - currentMinute;
+
+    // Handle wraparound (e.g., 59 -> 0)
+    if (minuteDiff < -30) {
+        minuteDiff += 60;
+    } else if (minuteDiff > 30) {
+        minuteDiff -= 60;
+    }
+
+    // Adjust timestamp by minute difference
+    return nowMs + (minuteDiff * 60 * 1000) + ms;
+}
+
+IEC104ConnectionManager::IEC104ConnectionManager() {
+    // TLS is not supported in this build
+    g_tlsConfig = nullptr;
 }
 
 IEC104ConnectionManager::~IEC104ConnectionManager() {
@@ -32,8 +69,8 @@ IEC104ConnectionManager::~IEC104ConnectionManager() {
     std::lock_guard<std::mutex> lock(connectionsMutex_);
     for (auto& pair : connections_) {
         auto& info = pair.second;
-        if (info.connection) {
-            CS104_Connection_destroy(info.connection);
+        if (info && info->connection) {
+            CS104_Connection_destroy(info->connection);
         }
     }
     connections_.clear();
@@ -53,25 +90,27 @@ bool IEC104ConnectionManager::addStation(const StationConfig& config) {
         return false;
     }
 
-    IEC104ConnectionInfo info;
-    info.stationId = config.id;
-    info.host = config.host;
-    info.port = config.port;
-    info.useTLS = config.useTLS;
-    info.caFile = config.caFile;
-    info.certFile = config.certFile;
-    info.keyFile = config.keyFile;
-    info.commonAddress = config.commonAddress > 0 ? config.commonAddress : 1;
-    info.status = ConnectionStatus::CONNECTING;
-    info.shouldReconnect = true;
+    auto info = std::make_unique<IEC104ConnectionInfo>();
+    info->stationId = config.id;
+    info->host = config.host;
+    info->port = config.port;
+    info->useTLS = config.useTLS;
+    info->caFile = config.caFile;
+    info->certFile = config.certFile;
+    info->keyFile = config.keyFile;
+    info->commonAddress = config.commonAddress > 0 ? config.commonAddress : 1;
+    info->status = ConnectionStatus::CONNECTING;
+    info->shouldReconnect = true;
+    info->holder = this;  // Store manager pointer
+
+    IEC104ConnectionInfo* infoPtr = info.get();
+    connections_[config.id] = std::move(info);
 
     // Connect in a separate thread
-    std::thread t([this, &info]() {
-        connectThreadFunc(info.stationId, &info);
+    std::thread t([this, infoPtr]() {
+        connectThreadFunc(infoPtr->stationId, infoPtr);
     });
     t.detach();
-
-    connections_[config.id] = info;
 
     std::cout << "[IEC104] Adding station: " << config.id << std::endl;
     return true;
@@ -87,11 +126,13 @@ bool IEC104ConnectionManager::removeStation(const std::string& stationId) {
     }
 
     auto& info = it->second;
-    info.shouldReconnect = false;
+    if (info) {
+        info->shouldReconnect = false;
 
-    if (info.connection) {
-        CS104_Connection_destroy(info.connection);
-        info.connection = nullptr;
+        if (info->connection) {
+            CS104_Connection_destroy(info->connection);
+            info->connection = nullptr;
+        }
     }
 
     connections_.erase(it);
@@ -105,38 +146,40 @@ void IEC104ConnectionManager::connectThreadFunc(const std::string& stationId, IE
     info->connection = createConnection(*info);
     if (!info->connection) {
         std::cerr << "[IEC104] Failed to create connection: " << stationId << std::endl;
-        info->status = ConnectionStatus::ERROR;
+        info->status = ConnectionStatus::CONN_ERROR;
         if (connectionCallback_) {
-            connectionCallback_(stationId, ConnectionStatus::ERROR, "Failed to create connection");
+            connectionCallback_(stationId, ConnectionStatus::CONN_ERROR, "Failed to create connection");
         }
         return;
     }
 
-    // Set handlers
-    g_currentStationId = stationId;
-    CS104_Connection_setASDUReceivedHandler(info->connection, asduReceivedHandler, this);
-    CS104_Connection_setConnectionHandler(info->connection, connectionHandler, this);
+    // Set handlers - pass info pointer to get station_id in callbacks
+    CS104_Connection_setASDUReceivedHandler(info->connection, asduReceivedHandler, info);
+    CS104_Connection_setConnectionHandler(info->connection, connectionHandler, info);
 
     // Connect
     if (!CS104_Connection_connect(info->connection)) {
         std::cerr << "[IEC104] Connection failed: " << stationId << std::endl;
-        info->status = ConnectionStatus::ERROR;
+        info->status = ConnectionStatus::CONN_ERROR;
         CS104_Connection_destroy(info->connection);
         info->connection = nullptr;
 
         if (connectionCallback_) {
-            connectionCallback_(stationId, ConnectionStatus::ERROR, "Connection failed");
+            connectionCallback_(stationId, ConnectionStatus::CONN_ERROR, "Connection failed");
         }
 
         // Start reconnect thread
         if (info->shouldReconnect) {
-            std::lock_guard<std::mutex> lock(info->reconnectMutex);
+            if (!info->reconnectMutex) info->reconnectMutex = std::make_unique<std::mutex>();
+            std::lock_guard<std::mutex> lock(*info->reconnectMutex);
             if (!info->reconnectThreadRunning) {
                 info->reconnectThreadRunning = true;
                 std::thread t([this, stationId, info]() {
                     reconnectThreadFunc(stationId, info);
-                    std::lock_guard<std::mutex> lock(info->reconnectMutex);
-                    info->reconnectThreadRunning = false;
+                    if (info->reconnectMutex) {
+                        std::lock_guard<std::mutex> lock(*info->reconnectMutex);
+                        info->reconnectThreadRunning = false;
+                    }
                 });
                 t.detach();
             }
@@ -182,9 +225,9 @@ void IEC104ConnectionManager::reconnectThreadFunc(const std::string& stationId, 
             continue;
         }
 
-        // Set handlers
-        CS104_Connection_setASDUReceivedHandler(info->connection, asduReceivedHandler, this);
-        CS104_Connection_setConnectionHandler(info->connection, connectionHandler, this);
+        // Set handlers - pass info pointer to get station_id in callbacks
+        CS104_Connection_setASDUReceivedHandler(info->connection, asduReceivedHandler, info);
+        CS104_Connection_setConnectionHandler(info->connection, connectionHandler, info);
 
         // Try to connect
         if (CS104_Connection_connect(info->connection)) {
@@ -203,32 +246,23 @@ void IEC104ConnectionManager::reconnectThreadFunc(const std::string& stationId, 
     }
 
     std::cerr << "[IEC104] Max retries reached: " << stationId << std::endl;
-    info->status = ConnectionStatus::ERROR;
+    info->status = ConnectionStatus::CONN_ERROR;
 
     if (connectionCallback_) {
-        connectionCallback_(stationId, ConnectionStatus::ERROR, "Max retries reached");
+        connectionCallback_(stationId, ConnectionStatus::CONN_ERROR, "Max retries reached");
     }
 }
 
 CS104_Connection IEC104ConnectionManager::createConnection(const IEC104ConnectionInfo& info) {
     CS104_Connection conn = nullptr;
 
-#if defined(LIB60870_HAS_TLS_SUPPORT)
-    if (info.useTLS && g_tlsConfig) {
-        conn = CS104_Connection_createSecure(
-            info.host.c_str(),
-            info.port,
-            g_tlsConfig,
-            info.certFile.c_str(),
-            info.keyFile.c_str(),
-            info.caFile.c_str()
-        );
-    } else {
-        conn = CS104_Connection_create(info.host.c_str(), info.port);
-    }
-#else
+    // Create basic connection (TLS not supported in this build)
     conn = CS104_Connection_create(info.host.c_str(), info.port);
-#endif
+
+    if (conn) {
+        // Set connection timeout (10 seconds)
+        CS104_Connection_setConnectTimeout(conn, 10);
+    }
 
     return conn;
 }
@@ -237,13 +271,13 @@ bool IEC104ConnectionManager::sendInterrogation(const std::string& stationId, in
     std::lock_guard<std::mutex> lock(connectionsMutex_);
 
     auto it = connections_.find(stationId);
-    if (it == connections_.end() || !it->second.connection) {
+    if (it == connections_.end() || !it->second || !it->second->connection) {
         std::cerr << "[IEC104] Station not connected: " << stationId << std::endl;
         return false;
     }
 
     bool result = CS104_Connection_sendInterrogationCommand(
-        it->second.connection,
+        it->second->connection,
         CS101_COT_ACTIVATION,
         ca,
         IEC60870_QOI_STATION
@@ -258,18 +292,18 @@ bool IEC104ConnectionManager::sendClockSync(const std::string& stationId, int ca
     std::lock_guard<std::mutex> lock(connectionsMutex_);
 
     auto it = connections_.find(stationId);
-    if (it == connections_.end() || !it->second.connection) {
+    if (it == connections_.end() || !it->second || !it->second->connection) {
         std::cerr << "[IEC104] Station not connected: " << stationId << std::endl;
         return false;
     }
 
-    // Get current time
-    CP56Time2a time = CP56Time2a_createFromTimestamp(
-        std::chrono::system_clock::to_time_t(std::chrono::system_clock::now())
-    );
+    // Get current time in milliseconds since epoch
+    auto now = std::chrono::system_clock::now();
+    uint64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
 
-    bool result = CS104_Connection_sendClockSyncCommand(it->second.connection, ca, time);
-    CP56Time2a_destroy(time);
+    CP56Time2a time = CP56Time2a_createFromMsTimestamp(nullptr, ms);
+
+    bool result = CS104_Connection_sendClockSyncCommand(it->second->connection, ca, time);
 
     std::cout << "[IEC104] Send clock sync to " << stationId
               << " (CA=" << ca << "): " << (result ? "OK" : "FAILED") << std::endl;
@@ -280,12 +314,12 @@ bool IEC104ConnectionManager::sendCounterRead(const std::string& stationId, int 
     std::lock_guard<std::mutex> lock(connectionsMutex_);
 
     auto it = connections_.find(stationId);
-    if (it == connections_.end() || !it->second.connection) {
+    if (it == connections_.end() || !it->second || !it->second->connection) {
         return false;
     }
 
     bool result = CS104_Connection_sendCounterInterrogationCommand(
-        it->second.connection,
+        it->second->connection,
         CS101_COT_ACTIVATION,
         ca,
         IEC60870_QCC_RQT_GENERAL | IEC60870_QCC_FRZ_FREEZE_WITHOUT_RESET
@@ -299,7 +333,7 @@ bool IEC104ConnectionManager::sendControl(const std::string& stationId, const Co
     std::lock_guard<std::mutex> lock(connectionsMutex_);
 
     auto it = connections_.find(stationId);
-    if (it == connections_.end() || !it->second.connection) {
+    if (it == connections_.end() || !it->second || !it->second->connection) {
         std::cerr << "[IEC104] Station not connected: " << stationId << std::endl;
         return false;
     }
@@ -309,12 +343,12 @@ bool IEC104ConnectionManager::sendControl(const std::string& stationId, const Co
     if (cmd.type == "single") {
         // C_SC_NA_1 - Single command
         auto sc = SingleCommand_create(nullptr, cmd.ioa, cmd.value != 0, cmd.select, false);
-        result = CS104_Connection_sendProcessCommand(it->second.connection, cmd.ca, (InformationObject)sc);
+        result = CS104_Connection_sendProcessCommandEx(it->second->connection, CS101_COT_ACTIVATION, cmd.ca, (InformationObject)sc);
         SingleCommand_destroy(sc);
     } else if (cmd.type == "double") {
         // C_DC_NA_1 - Double command
         auto dc = DoubleCommand_create(nullptr, cmd.ioa, cmd.value, cmd.select, false);
-        result = CS104_Connection_sendProcessCommand(it->second.connection, cmd.ca, (InformationObject)dc);
+        result = CS104_Connection_sendProcessCommandEx(it->second->connection, CS101_COT_ACTIVATION, cmd.ca, (InformationObject)dc);
         DoubleCommand_destroy(dc);
     }
 
@@ -329,6 +363,10 @@ void IEC104ConnectionManager::setConnectionCallback(ConnectionCallback cb) {
 
 void IEC104ConnectionManager::setDataCallback(DataCallback cb) {
     dataCallback_ = cb;
+}
+
+void IEC104ConnectionManager::setASDUDataCallback(ASDUDataCallback cb) {
+    asduDataCallback_ = cb;
 }
 
 void IEC104ConnectionManager::setPacketCallback(PacketCallback cb) {
@@ -362,9 +400,12 @@ void IEC104ConnectionManager::onSendControl(const std::string& stationId, const 
 
 // Static callbacks
 bool IEC104ConnectionManager::asduReceivedHandler(void* param, int size, CS101_ASDU asdu) {
-    auto* self = static_cast<IEC104ConnectionManager*>(param);
-    // Get station ID from thread local or connection
-    std::string stationId = g_currentStationId;
+    auto* info = static_cast<IEC104ConnectionInfo*>(param);
+    if (!info) return false;
+
+    // Get station ID from info struct
+    std::string stationId = info->stationId;
+    auto* self = static_cast<IEC104ConnectionManager*>(info->holder);
 
     if (self) {
         self->parseASDU(stationId, asdu);
@@ -374,10 +415,12 @@ bool IEC104ConnectionManager::asduReceivedHandler(void* param, int size, CS101_A
 }
 
 void IEC104ConnectionManager::connectionHandler(void* param, CS104_Connection connection, CS104_ConnectionEvent event) {
-    auto* self = static_cast<IEC104ConnectionManager*>(param);
-    if (!self) return;
+    auto* info = static_cast<IEC104ConnectionInfo*>(param);
+    if (!info) return;
 
-    std::string stationId = g_currentStationId;
+    std::string stationId = info->stationId;
+    auto* self = static_cast<IEC104ConnectionManager*>(info->holder);
+    if (!self) return;
 
     switch (event) {
         case CS104_CONNECTION_OPENED:
@@ -397,7 +440,7 @@ void IEC104ConnectionManager::connectionHandler(void* param, CS104_Connection co
         case CS104_CONNECTION_FAILED:
             std::cout << "[IEC104] Connection failed: " << stationId << std::endl;
             if (self->connectionCallback_) {
-                self->connectionCallback_(stationId, ConnectionStatus::ERROR, "Connection failed");
+                self->connectionCallback_(stationId, ConnectionStatus::CONN_ERROR, "Connection failed");
             }
             break;
 
@@ -412,12 +455,17 @@ void IEC104ConnectionManager::parseASDU(const std::string& stationId, CS101_ASDU
 
     std::vector<DigitalPointData> digital;
     std::vector<TelemetryPointData> telemetry;
+    std::vector<StepPositionData> step;
+    std::vector<BitstringData> bitstring;
+    std::vector<CounterPointData> counter;
+    std::vector<ProtectionEventData> protection;
 
     auto timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
     switch (typeId) {
-        case M_SP_NA_1: { // Single point information
+        // ==================== Single Point Information ====================
+        case M_SP_NA_1: { // Single point information (no time)
             for (int i = 0; i < numElements; i++) {
                 auto sp = (SinglePointInformation)CS101_ASDU_getElement(asdu, i);
                 DigitalPointData p;
@@ -432,7 +480,38 @@ void IEC104ConnectionManager::parseASDU(const std::string& stationId, CS101_ASDU
             break;
         }
 
-        case M_DP_NA_1: { // Double point information
+        case M_SP_TA_1: { // Single point information with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto sp = (SinglePointWithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                DigitalPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)sp);
+                p.type = "M_SP_TA_1";
+                p.value = SinglePointInformation_getValue((SinglePointInformation)sp);
+                p.quality = SinglePointInformation_getQuality((SinglePointInformation)sp);
+                p.timestamp = extractCP24Timestamp(SinglePointWithCP24Time2a_getTimestamp(sp));
+                digital.push_back(p);
+                SinglePointWithCP24Time2a_destroy(sp);
+            }
+            break;
+        }
+
+        case M_SP_TB_1: { // Single point information with CP56Time2a (Type 30)
+            for (int i = 0; i < numElements; i++) {
+                auto sp = (SinglePointWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                DigitalPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)sp);
+                p.type = "M_SP_TB_1";
+                p.value = SinglePointInformation_getValue((SinglePointInformation)sp);
+                p.quality = SinglePointInformation_getQuality((SinglePointInformation)sp);
+                p.timestamp = extractCP56Timestamp(SinglePointWithCP56Time2a_getTimestamp(sp));
+                digital.push_back(p);
+                SinglePointWithCP56Time2a_destroy(sp);
+            }
+            break;
+        }
+
+        // ==================== Double Point Information ====================
+        case M_DP_NA_1: { // Double point information (no time)
             for (int i = 0; i < numElements; i++) {
                 auto dp = (DoublePointInformation)CS101_ASDU_getElement(asdu, i);
                 DigitalPointData p;
@@ -447,14 +526,140 @@ void IEC104ConnectionManager::parseASDU(const std::string& stationId, CS101_ASDU
             break;
         }
 
-        case M_ME_NA_1: { // Measured value, normalized
+        case M_DP_TA_1: { // Double point information with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto dp = (DoublePointWithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                DigitalPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)dp);
+                p.type = "M_DP_TA_1";
+                p.value = DoublePointInformation_getValue((DoublePointInformation)dp);
+                p.quality = 0;
+                p.timestamp = extractCP24Timestamp(DoublePointWithCP24Time2a_getTimestamp(dp));
+                digital.push_back(p);
+                DoublePointWithCP24Time2a_destroy(dp);
+            }
+            break;
+        }
+
+        case M_DP_TB_1: { // Double point information with CP56Time2a (Type 31)
+            for (int i = 0; i < numElements; i++) {
+                auto dp = (DoublePointWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                DigitalPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)dp);
+                p.type = "M_DP_TB_1";
+                p.value = DoublePointInformation_getValue((DoublePointInformation)dp);
+                p.quality = 0;
+                p.timestamp = extractCP56Timestamp(DoublePointWithCP56Time2a_getTimestamp(dp));
+                digital.push_back(p);
+                DoublePointWithCP56Time2a_destroy(dp);
+            }
+            break;
+        }
+
+        // ==================== Step Position Information ====================
+        case M_ST_NA_1: { // Step position information (no time)
+            for (int i = 0; i < numElements; i++) {
+                auto sp = (StepPositionInformation)CS101_ASDU_getElement(asdu, i);
+                StepPositionData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)sp);
+                p.type = "M_ST_NA_1";
+                p.value = StepPositionInformation_getValue(sp);
+                p.transient = StepPositionInformation_isTransient(sp);
+                p.quality = 0;
+                p.timestamp = timestamp;
+                step.push_back(p);
+                StepPositionInformation_destroy(sp);
+            }
+            break;
+        }
+
+        case M_ST_TA_1: { // Step position information with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto sp = (StepPositionWithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                StepPositionData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)sp);
+                p.type = "M_ST_TA_1";
+                p.value = StepPositionInformation_getValue((StepPositionInformation)sp);
+                p.transient = StepPositionInformation_isTransient((StepPositionInformation)sp);
+                p.quality = 0;
+                p.timestamp = extractCP24Timestamp(StepPositionWithCP24Time2a_getTimestamp(sp));
+                step.push_back(p);
+                StepPositionWithCP24Time2a_destroy(sp);
+            }
+            break;
+        }
+
+        case M_ST_TB_1: { // Step position information with CP56Time2a (Type 32)
+            for (int i = 0; i < numElements; i++) {
+                auto sp = (StepPositionWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                StepPositionData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)sp);
+                p.type = "M_ST_TB_1";
+                p.value = StepPositionInformation_getValue((StepPositionInformation)sp);
+                p.transient = StepPositionInformation_isTransient((StepPositionInformation)sp);
+                p.quality = 0;
+                p.timestamp = extractCP56Timestamp(StepPositionWithCP56Time2a_getTimestamp(sp));
+                step.push_back(p);
+                StepPositionWithCP56Time2a_destroy(sp);
+            }
+            break;
+        }
+
+        // ==================== Bitstring 32-bit ====================
+        case M_BO_NA_1: { // Bitstring 32-bit (no time)
+            for (int i = 0; i < numElements; i++) {
+                auto bs = (BitString32)CS101_ASDU_getElement(asdu, i);
+                BitstringData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)bs);
+                p.type = "M_BO_NA_1";
+                p.value = BitString32_getValue(bs);
+                p.quality = 0;
+                p.timestamp = timestamp;
+                bitstring.push_back(p);
+                BitString32_destroy(bs);
+            }
+            break;
+        }
+
+        case M_BO_TA_1: { // Bitstring 32-bit with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto bs = (Bitstring32WithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                BitstringData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)bs);
+                p.type = "M_BO_TA_1";
+                p.value = BitString32_getValue((BitString32)bs);
+                p.quality = 0;
+                p.timestamp = extractCP24Timestamp(Bitstring32WithCP24Time2a_getTimestamp(bs));
+                bitstring.push_back(p);
+                Bitstring32WithCP24Time2a_destroy(bs);
+            }
+            break;
+        }
+
+        case M_BO_TB_1: { // Bitstring 32-bit with CP56Time2a (Type 33)
+            for (int i = 0; i < numElements; i++) {
+                auto bs = (Bitstring32WithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                BitstringData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)bs);
+                p.type = "M_BO_TB_1";
+                p.value = BitString32_getValue((BitString32)bs);
+                p.quality = 0;
+                p.timestamp = extractCP56Timestamp(Bitstring32WithCP56Time2a_getTimestamp(bs));
+                bitstring.push_back(p);
+                Bitstring32WithCP56Time2a_destroy(bs);
+            }
+            break;
+        }
+
+        // ==================== Measured Value - Normalized ====================
+        case M_ME_NA_1: { // Measured value, normalized (no time)
             for (int i = 0; i < numElements; i++) {
                 auto mv = (MeasuredValueNormalized)CS101_ASDU_getElement(asdu, i);
                 TelemetryPointData p;
                 p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
                 p.type = "M_ME_NA_1";
                 p.value = (double)MeasuredValueNormalized_getValue(mv);
-                p.quality = 0;
+                p.quality = MeasuredValueNormalized_getQuality(mv);
                 p.timestamp = timestamp;
                 telemetry.push_back(p);
                 MeasuredValueNormalized_destroy(mv);
@@ -462,14 +667,60 @@ void IEC104ConnectionManager::parseASDU(const std::string& stationId, CS101_ASDU
             break;
         }
 
-        case M_ME_NB_1: { // Measured value, scaled
+        case M_ME_TA_1: { // Measured value, normalized with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto mv = (MeasuredValueNormalizedWithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                TelemetryPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
+                p.type = "M_ME_TA_1";
+                p.value = (double)MeasuredValueNormalized_getValue((MeasuredValueNormalized)mv);
+                p.quality = MeasuredValueNormalized_getQuality((MeasuredValueNormalized)mv);
+                p.timestamp = extractCP24Timestamp(MeasuredValueNormalizedWithCP24Time2a_getTimestamp(mv));
+                telemetry.push_back(p);
+                MeasuredValueNormalizedWithCP24Time2a_destroy(mv);
+            }
+            break;
+        }
+
+        case M_ME_TD_1: { // Measured value, normalized with CP56Time2a (Type 34)
+            for (int i = 0; i < numElements; i++) {
+                auto mv = (MeasuredValueNormalizedWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                TelemetryPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
+                p.type = "M_ME_TD_1";
+                p.value = (double)MeasuredValueNormalized_getValue((MeasuredValueNormalized)mv);
+                p.quality = MeasuredValueNormalized_getQuality((MeasuredValueNormalized)mv);
+                p.timestamp = extractCP56Timestamp(MeasuredValueNormalizedWithCP56Time2a_getTimestamp(mv));
+                telemetry.push_back(p);
+                MeasuredValueNormalizedWithCP56Time2a_destroy(mv);
+            }
+            break;
+        }
+
+        case M_ME_ND_1: { // Measured value, normalized without quality (Type 21)
+            for (int i = 0; i < numElements; i++) {
+                auto mv = (MeasuredValueNormalizedWithoutQuality)CS101_ASDU_getElement(asdu, i);
+                TelemetryPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
+                p.type = "M_ME_ND_1";
+                p.value = (double)MeasuredValueNormalizedWithoutQuality_getValue(mv);
+                p.quality = 0;
+                p.timestamp = timestamp;
+                telemetry.push_back(p);
+                MeasuredValueNormalizedWithoutQuality_destroy(mv);
+            }
+            break;
+        }
+
+        // ==================== Measured Value - Scaled ====================
+        case M_ME_NB_1: { // Measured value, scaled (no time)
             for (int i = 0; i < numElements; i++) {
                 auto mv = (MeasuredValueScaled)CS101_ASDU_getElement(asdu, i);
                 TelemetryPointData p;
                 p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
                 p.type = "M_ME_NB_1";
-                p.value = MeasuredValueScaled_getValue(mv);
-                p.quality = 0;
+                p.value = (double)MeasuredValueScaled_getValue(mv);
+                p.quality = MeasuredValueScaled_getQuality(mv);
                 p.timestamp = timestamp;
                 telemetry.push_back(p);
                 MeasuredValueScaled_destroy(mv);
@@ -477,18 +728,267 @@ void IEC104ConnectionManager::parseASDU(const std::string& stationId, CS101_ASDU
             break;
         }
 
-        case M_ME_NC_1: { // Measured value, short float
+        case M_ME_TB_1: { // Measured value, scaled with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto mv = (MeasuredValueScaledWithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                TelemetryPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
+                p.type = "M_ME_TB_1";
+                p.value = (double)MeasuredValueScaled_getValue((MeasuredValueScaled)mv);
+                p.quality = MeasuredValueScaled_getQuality((MeasuredValueScaled)mv);
+                p.timestamp = extractCP24Timestamp(MeasuredValueScaledWithCP24Time2a_getTimestamp(mv));
+                telemetry.push_back(p);
+                MeasuredValueScaledWithCP24Time2a_destroy(mv);
+            }
+            break;
+        }
+
+        case M_ME_TE_1: { // Measured value, scaled with CP56Time2a (Type 35)
+            for (int i = 0; i < numElements; i++) {
+                auto mv = (MeasuredValueScaledWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                TelemetryPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
+                p.type = "M_ME_TE_1";
+                p.value = (double)MeasuredValueScaled_getValue((MeasuredValueScaled)mv);
+                p.quality = MeasuredValueScaled_getQuality((MeasuredValueScaled)mv);
+                p.timestamp = extractCP56Timestamp(MeasuredValueScaledWithCP56Time2a_getTimestamp(mv));
+                telemetry.push_back(p);
+                MeasuredValueScaledWithCP56Time2a_destroy(mv);
+            }
+            break;
+        }
+
+        // ==================== Measured Value - Short Float ====================
+        case M_ME_NC_1: { // Measured value, short float (no time)
             for (int i = 0; i < numElements; i++) {
                 auto mv = (MeasuredValueShort)CS101_ASDU_getElement(asdu, i);
                 TelemetryPointData p;
                 p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
                 p.type = "M_ME_NC_1";
                 p.value = MeasuredValueShort_getValue(mv);
-                p.quality = 0;
+                p.quality = MeasuredValueShort_getQuality(mv);
                 p.timestamp = timestamp;
                 telemetry.push_back(p);
                 MeasuredValueShort_destroy(mv);
             }
+            break;
+        }
+
+        case M_ME_TC_1: { // Measured value, short float with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto mv = (MeasuredValueShortWithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                TelemetryPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
+                p.type = "M_ME_TC_1";
+                p.value = MeasuredValueShort_getValue((MeasuredValueShort)mv);
+                p.quality = MeasuredValueShort_getQuality((MeasuredValueShort)mv);
+                p.timestamp = extractCP24Timestamp(MeasuredValueShortWithCP24Time2a_getTimestamp(mv));
+                telemetry.push_back(p);
+                MeasuredValueShortWithCP24Time2a_destroy(mv);
+            }
+            break;
+        }
+
+        case M_ME_TF_1: { // Measured value, short float with CP56Time2a (Type 36)
+            for (int i = 0; i < numElements; i++) {
+                auto mv = (MeasuredValueShortWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                TelemetryPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)mv);
+                p.type = "M_ME_TF_1";
+                p.value = MeasuredValueShort_getValue((MeasuredValueShort)mv);
+                p.quality = MeasuredValueShort_getQuality((MeasuredValueShort)mv);
+                p.timestamp = extractCP56Timestamp(MeasuredValueShortWithCP56Time2a_getTimestamp(mv));
+                telemetry.push_back(p);
+                MeasuredValueShortWithCP56Time2a_destroy(mv);
+            }
+            break;
+        }
+
+        // ==================== Integrated Totals (Counter) ====================
+        case M_IT_NA_1: { // Integrated totals (no time)
+            for (int i = 0; i < numElements; i++) {
+                auto it = (IntegratedTotals)CS101_ASDU_getElement(asdu, i);
+                CounterPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)it);
+                p.type = "M_IT_NA_1";
+                auto bcr = IntegratedTotals_getBCR(it);
+                p.value = BinaryCounterReading_getValue(bcr);
+                p.quality = 0;
+                p.timestamp = timestamp;
+                p.carry = BinaryCounterReading_hasCarry(bcr);
+                p.sequenceNumber = BinaryCounterReading_getSequenceNumber(bcr);
+                counter.push_back(p);
+                IntegratedTotals_destroy(it);
+            }
+            break;
+        }
+
+        case M_IT_TA_1: { // Integrated totals with CP24Time2a
+            for (int i = 0; i < numElements; i++) {
+                auto it = (IntegratedTotalsWithCP24Time2a)CS101_ASDU_getElement(asdu, i);
+                CounterPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)it);
+                p.type = "M_IT_TA_1";
+                auto bcr = IntegratedTotals_getBCR((IntegratedTotals)it);
+                p.value = BinaryCounterReading_getValue(bcr);
+                p.quality = 0;
+                p.timestamp = extractCP24Timestamp(IntegratedTotalsWithCP24Time2a_getTimestamp(it));
+                p.carry = BinaryCounterReading_hasCarry(bcr);
+                p.sequenceNumber = BinaryCounterReading_getSequenceNumber(bcr);
+                counter.push_back(p);
+                IntegratedTotalsWithCP24Time2a_destroy(it);
+            }
+            break;
+        }
+
+        case M_IT_TB_1: { // Integrated totals with CP56Time2a (Type 37)
+            for (int i = 0; i < numElements; i++) {
+                auto it = (IntegratedTotalsWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                CounterPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)it);
+                p.type = "M_IT_TB_1";
+                auto bcr = IntegratedTotals_getBCR((IntegratedTotals)it);
+                p.value = BinaryCounterReading_getValue(bcr);
+                p.quality = 0;
+                p.timestamp = extractCP56Timestamp(IntegratedTotalsWithCP56Time2a_getTimestamp(it));
+                p.carry = BinaryCounterReading_hasCarry(bcr);
+                p.sequenceNumber = BinaryCounterReading_getSequenceNumber(bcr);
+                counter.push_back(p);
+                IntegratedTotalsWithCP56Time2a_destroy(it);
+            }
+            break;
+        }
+
+        case S_IT_TC_1: { // Integrated totals for security with CP56Time2a (Type 41)
+            for (int i = 0; i < numElements; i++) {
+                auto it = (IntegratedTotalsForSecurityStatistics)CS101_ASDU_getElement(asdu, i);
+                CounterPointData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)it);
+                p.type = "S_IT_TC_1";
+                auto bcr = IntegratedTotalsForSecurityStatistics_getBCR(it);
+                p.value = BinaryCounterReading_getValue(bcr);
+                p.quality = 0;
+                p.timestamp = extractCP56Timestamp(IntegratedTotalsForSecurityStatistics_getTimestamp(it));
+                p.carry = BinaryCounterReading_hasCarry(bcr);
+                p.sequenceNumber = BinaryCounterReading_getSequenceNumber(bcr);
+                counter.push_back(p);
+                IntegratedTotalsForSecurityStatistics_destroy(it);
+            }
+            break;
+        }
+
+        // ==================== Protection Equipment Events ====================
+        case M_EP_TA_1: { // Event of protection equipment
+            for (int i = 0; i < numElements; i++) {
+                auto ee = (EventOfProtectionEquipment)CS101_ASDU_getElement(asdu, i);
+                ProtectionEventData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)ee);
+                p.type = "M_EP_TA_1";
+                p.eventType = (int)SingleEvent_getEventState(EventOfProtectionEquipment_getEvent(ee));
+                p.timestamp = timestamp;
+                protection.push_back(p);
+                EventOfProtectionEquipment_destroy(ee);
+            }
+            break;
+        }
+
+        case M_EP_TB_1: { // Packed start events of protection equipment
+            for (int i = 0; i < numElements; i++) {
+                auto pe = (PackedStartEventsOfProtectionEquipment)CS101_ASDU_getElement(asdu, i);
+                ProtectionEventData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)pe);
+                p.type = "M_EP_TB_1";
+                p.eventType = 0;  // Packed events don't have single event code
+                p.timestamp = timestamp;
+                protection.push_back(p);
+                PackedStartEventsOfProtectionEquipment_destroy(pe);
+            }
+            break;
+        }
+
+        case M_EP_TC_1: { // Packed output circuit info
+            for (int i = 0; i < numElements; i++) {
+                auto oci = (PackedOutputCircuitInfo)CS101_ASDU_getElement(asdu, i);
+                ProtectionEventData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)oci);
+                p.type = "M_EP_TC_1";
+                p.eventType = 0;
+                p.timestamp = timestamp;
+                protection.push_back(p);
+                PackedOutputCircuitInfo_destroy(oci);
+            }
+            break;
+        }
+
+        case M_EP_TD_1: { // Event of protection equipment with CP56Time2a (Type 38)
+            for (int i = 0; i < numElements; i++) {
+                auto ee = (EventOfProtectionEquipmentWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                ProtectionEventData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)ee);
+                p.type = "M_EP_TD_1";
+                p.eventType = (int)SingleEvent_getEventState(EventOfProtectionEquipment_getEvent((EventOfProtectionEquipment)ee));
+                p.timestamp = extractCP56Timestamp(EventOfProtectionEquipmentWithCP56Time2a_getTimestamp(ee));
+                protection.push_back(p);
+                EventOfProtectionEquipmentWithCP56Time2a_destroy(ee);
+            }
+            break;
+        }
+
+        case M_EP_TE_1: { // Packed start events with CP56Time2a (Type 39)
+            for (int i = 0; i < numElements; i++) {
+                auto pe = (PackedStartEventsOfProtectionEquipmentWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                ProtectionEventData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)pe);
+                p.type = "M_EP_TE_1";
+                p.eventType = 0;
+                p.timestamp = extractCP56Timestamp(PackedStartEventsOfProtectionEquipmentWithCP56Time2a_getTimestamp(pe));
+                protection.push_back(p);
+                PackedStartEventsOfProtectionEquipmentWithCP56Time2a_destroy(pe);
+            }
+            break;
+        }
+
+        case M_EP_TF_1: { // Packed output circuit info with CP56Time2a (Type 40)
+            for (int i = 0; i < numElements; i++) {
+                auto oci = (PackedOutputCircuitInfoWithCP56Time2a)CS101_ASDU_getElement(asdu, i);
+                ProtectionEventData p;
+                p.ioa = InformationObject_getObjectAddress((InformationObject)oci);
+                p.type = "M_EP_TF_1";
+                p.eventType = 0;
+                p.timestamp = extractCP56Timestamp(PackedOutputCircuitInfoWithCP56Time2a_getTimestamp(oci));
+                protection.push_back(p);
+                PackedOutputCircuitInfoWithCP56Time2a_destroy(oci);
+            }
+            break;
+        }
+
+        // ==================== Packed Single Point with SCD ====================
+        case M_PS_NA_1: { // Packed single point with SCD
+            for (int i = 0; i < numElements; i++) {
+                auto ps = (PackedSinglePointWithSCD)CS101_ASDU_getElement(asdu, i);
+                // Convert SCD to individual digital points
+                auto scd = PackedSinglePointWithSCD_getSCD(ps);
+                int qds = PackedSinglePointWithSCD_getQuality(ps);
+                int ioaBase = InformationObject_getObjectAddress((InformationObject)ps);
+
+                // SCD contains up to 16 single points
+                for (int j = 0; j < 16; j++) {
+                    DigitalPointData p;
+                    p.ioa = ioaBase + j;
+                    p.type = "M_PS_NA_1";
+                    p.value = StatusAndStatusChangeDetection_getST(scd, j) ? 1 : 0;
+                    p.quality = qds;
+                    p.timestamp = timestamp;
+                    digital.push_back(p);
+                }
+                PackedSinglePointWithSCD_destroy(ps);
+            }
+            break;
+        }
+
+        // ==================== End of Initialization ====================
+        case M_EI_NA_1: { // End of initialization
+            std::cout << "[IEC104] End of initialization received from station: " << stationId << std::endl;
             break;
         }
 
@@ -497,9 +997,14 @@ void IEC104ConnectionManager::parseASDU(const std::string& stationId, CS101_ASDU
             break;
     }
 
-    // Send to callbacks
+    // Send to legacy callback (backward compatibility)
     if (dataCallback_ && (!digital.empty() || !telemetry.empty())) {
         dataCallback_(stationId, digital, telemetry);
+    }
+
+    // Send to extended callback (new)
+    if (asduDataCallback_) {
+        asduDataCallback_(stationId, digital, telemetry, step, bitstring, counter, protection);
     }
 }
 
