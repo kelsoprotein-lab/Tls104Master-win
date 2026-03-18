@@ -158,6 +158,8 @@ public:
     // Station management
     bool addStation(const StationConfig& config);
     bool removeStation(const std::string& stationId);
+    bool disconnectStation(const std::string& stationId);
+    bool connectStation(const std::string& stationId);
 
     // Commands
     bool sendInterrogation(const std::string& stationId, int ca);
@@ -175,6 +177,8 @@ public:
     // IPCBridgeCallback implementation
     void onAddStation(const StationConfig& config) override;
     void onRemoveStation(const std::string& stationId) override;
+    void onDisconnectStation(const std::string& stationId) override;
+    void onConnectStation(const std::string& stationId) override;
     void onSendInterrogation(const std::string& stationId, int ca) override;
     void onSendClockSync(const std::string& stationId, int ca) override;
     void onSendCounterRead(const std::string& stationId, int ca) override;

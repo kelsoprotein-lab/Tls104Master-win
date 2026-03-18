@@ -148,6 +148,76 @@ bool IEC104ConnectionManager::removeStation(const std::string& stationId) {
     return true;
 }
 
+bool IEC104ConnectionManager::disconnectStation(const std::string& stationId) {
+    std::lock_guard<std::mutex> lock(connectionsMutex_);
+
+    auto it = connections_.find(stationId);
+    if (it == connections_.end()) {
+        std::cerr << "[IEC104] Station not found: " << stationId << std::endl;
+        return false;
+    }
+
+    auto& info = it->second;
+    if (info) {
+        info->shouldReconnect = false;
+
+        if (info->connection) {
+            CS104_Connection_destroy(info->connection);
+            info->connection = nullptr;
+        }
+
+        if (info->tlsConfig) {
+            TLSConfiguration_destroy(info->tlsConfig);
+            info->tlsConfig = nullptr;
+        }
+
+        info->status = ConnectionStatus::DISCONNECTED;
+    }
+
+    std::cout << "[IEC104] Disconnected station: " << stationId << std::endl;
+
+    if (connectionCallback_) {
+        connectionCallback_(stationId, ConnectionStatus::DISCONNECTED, "Manually disconnected");
+    }
+
+    return true;
+}
+
+bool IEC104ConnectionManager::connectStation(const std::string& stationId) {
+    std::lock_guard<std::mutex> lock(connectionsMutex_);
+
+    auto it = connections_.find(stationId);
+    if (it == connections_.end()) {
+        std::cerr << "[IEC104] Station not found: " << stationId << std::endl;
+        return false;
+    }
+
+    auto& info = it->second;
+    if (!info) return false;
+
+    // Already connected
+    if (info->connection && info->status == ConnectionStatus::CONNECTED) {
+        std::cout << "[IEC104] Station already connected: " << stationId << std::endl;
+        return true;
+    }
+
+    info->shouldReconnect = true;
+    info->status = ConnectionStatus::CONNECTING;
+
+    if (connectionCallback_) {
+        connectionCallback_(stationId, ConnectionStatus::CONNECTING, "Connecting");
+    }
+
+    IEC104ConnectionInfo* infoPtr = info.get();
+    std::thread t([this, stationId, infoPtr]() {
+        connectThreadFunc(stationId, infoPtr);
+    });
+    t.detach();
+
+    std::cout << "[IEC104] Connecting station: " << stationId << std::endl;
+    return true;
+}
+
 void IEC104ConnectionManager::connectThreadFunc(const std::string& stationId, IEC104ConnectionInfo* info) {
     std::cout << "[IEC104] Connecting to " << stationId << "..." << std::endl;
 
@@ -495,6 +565,14 @@ void IEC104ConnectionManager::onAddStation(const StationConfig& config) {
 
 void IEC104ConnectionManager::onRemoveStation(const std::string& stationId) {
     removeStation(stationId);
+}
+
+void IEC104ConnectionManager::onDisconnectStation(const std::string& stationId) {
+    disconnectStation(stationId);
+}
+
+void IEC104ConnectionManager::onConnectStation(const std::string& stationId) {
+    connectStation(stationId);
 }
 
 void IEC104ConnectionManager::onSendInterrogation(const std::string& stationId, int ca) {

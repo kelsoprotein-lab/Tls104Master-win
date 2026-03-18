@@ -105,6 +105,20 @@ public:
             tls104::g_iec104->sendControl(stationId, cmd);
         }
     }
+
+    void onDisconnectStation(const std::string& stationId) override {
+        std::cout << "[Main] Disconnecting station: " << stationId << std::endl;
+        if (tls104::g_iec104) {
+            tls104::g_iec104->disconnectStation(stationId);
+        }
+    }
+
+    void onConnectStation(const std::string& stationId) override {
+        std::cout << "[Main] Connecting station: " << stationId << std::endl;
+        if (tls104::g_iec104) {
+            tls104::g_iec104->connectStation(stationId);
+        }
+    }
 };
 
 static AppIPCBridgeCallback* g_appCallback = nullptr;
@@ -253,6 +267,39 @@ std::string handleAPIRequest(const std::string& path, const std::string& method,
 
         if (g_appCallback) {
             g_appCallback->onRemoveStation(stationId);
+        }
+
+        std::string json = "{\"code\":0,\"message\":\"ok\"}";
+        return "HTTP/1.1 200 OK\r\n"
+               "Content-Type: application/json\r\n"
+               "Content-Length: " + std::to_string(json.size()) + "\r\n"
+               "Access-Control-Allow-Origin: *\r\n"
+               "\r\n" + json;
+    }
+
+    // POST /api/stations/:id/disconnect
+    if (method == "POST" && path.find("/api/stations/") == 0 && path.find("/disconnect") != std::string::npos) {
+        std::string stationId = path.substr(14, path.find("/", 14) - 14);
+
+        if (g_appCallback) {
+            g_appCallback->onDisconnectStation(stationId);
+        }
+
+        std::string json = "{\"code\":0,\"message\":\"ok\"}";
+        return "HTTP/1.1 200 OK\r\n"
+               "Content-Type: application/json\r\n"
+               "Content-Length: " + std::to_string(json.size()) + "\r\n"
+               "Access-Control-Allow-Origin: *\r\n"
+               "\r\n" + json;
+    }
+
+    // POST /api/stations/:id/connect
+    if (method == "POST" && path.find("/api/stations/") == 0 && path.find("/connect") != std::string::npos
+        && path.find("/disconnect") == std::string::npos) {
+        std::string stationId = path.substr(14, path.find("/", 14) - 14);
+
+        if (g_appCallback) {
+            g_appCallback->onConnectStation(stationId);
         }
 
         std::string json = "{\"code\":0,\"message\":\"ok\"}";
@@ -545,7 +592,6 @@ int main(int argc, char* argv[]) {
 
     // Start HTTP server
     g_httpServer = std::make_unique<HttpServer>(httpPort);
-    g_httpServer->setDocumentRoot("F:/__goldwind__/__personal__/__code__/Tls104Master-win/web");
     g_httpServer->setAPIHandler(handleAPIRequest);
 
     if (!g_httpServer->start()) {

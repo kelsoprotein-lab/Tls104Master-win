@@ -98,16 +98,24 @@
                                 <span class="status-dot" :class="'status-' + station.status"></span>
                                 {{ station.station_id }}
                             </span>
-                            <el-button size="small" type="danger" @click="removeStation(station.station_id)">删除</el-button>
+                            <div style="display: flex; gap: 6px;">
+                                <el-button
+                                    size="small"
+                                    :type="station.status === 'connected' ? 'warning' : 'success'"
+                                    @click="station.status === 'connected' ? disconnectStation(station.station_id) : connectStation(station.station_id)">
+                                    {{ station.status === 'connected' ? '断开' : '连接' }}
+                                </el-button>
+                                <el-button size="small" type="danger" @click="removeStation(station.station_id)">删除</el-button>
+                            </div>
                         </div>
                     </template>
                     <p>地址: {{ station.host }}:{{ station.port }}</p>
                     <p>状态: {{ station.status }}</p>
                     <p v-if="station.tls_status">TLS: {{ station.tls_status }}</p>
                     <div style="margin-top: 12px;">
-                        <el-button size="small" type="primary" @click="sendInterrogation(station.station_id)">总召唤</el-button>
-                        <el-button size="small" @click="sendCounterInterrogation(station.station_id)">累积量</el-button>
-                        <el-button size="small" @click="sendClockSync(station.station_id)">时钟同步</el-button>
+                        <el-button size="small" type="primary" @click="sendInterrogation(station.station_id)" :disabled="station.status !== 'connected'">总召唤</el-button>
+                        <el-button size="small" @click="sendCounterInterrogation(station.station_id)" :disabled="station.status !== 'connected'">累积量</el-button>
+                        <el-button size="small" @click="sendClockSync(station.station_id)" :disabled="station.status !== 'connected'">时钟同步</el-button>
                     </div>
                 </el-card>
             </el-col>
@@ -1290,6 +1298,10 @@
                                 console.log('[JS] Add station result:', result);
                             } else if (type === 'remove_station') {
                                 await fetch('/api/stations/' + data.station_id, { method: 'DELETE' });
+                            } else if (type === 'disconnect_station') {
+                                await fetch('/api/stations/' + data.station_id + '/disconnect', { method: 'POST' });
+                            } else if (type === 'connect_station') {
+                                await fetch('/api/stations/' + data.station_id + '/connect', { method: 'POST' });
                             } else if (type === 'interrogation') {
                                 await fetch('/api/stations/' + data.station_id + '/interrogation', { method: 'POST' });
                             } else if (type === 'clock_sync') {
@@ -1359,6 +1371,18 @@
                 async function removeStation(stationId) {
                     stations.value = stations.value.filter(s => s.station_id !== stationId);
                     sendToCpp('remove_station', { station_id: stationId });
+                }
+
+                async function disconnectStation(stationId) {
+                    sendToCpp('disconnect_station', { station_id: stationId });
+                }
+
+                async function connectStation(stationId) {
+                    const idx = stations.value.findIndex(s => s.station_id === stationId);
+                    if (idx !== -1) {
+                        stations.value[idx] = { ...stations.value[idx], status: 'connecting' };
+                    }
+                    sendToCpp('connect_station', { station_id: stationId });
                 }
 
                 async function sendInterrogation(stationId) {
@@ -1469,6 +1493,8 @@
                     handleStationPageChange,
                     packetVirtualItems,
                     onPacketScroll,
+                    disconnectStation,
+                    connectStation,
                 };
             }
         });

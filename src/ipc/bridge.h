@@ -67,6 +67,8 @@ public:
 
     virtual void onAddStation(const StationConfig& config) = 0;
     virtual void onRemoveStation(const std::string& stationId) = 0;
+    virtual void onDisconnectStation(const std::string& stationId) = 0;
+    virtual void onConnectStation(const std::string& stationId) = 0;
     virtual void onSendInterrogation(const std::string& stationId, int ca) = 0;
     virtual void onSendClockSync(const std::string& stationId, int ca) = 0;
     virtual void onSendCounterRead(const std::string& stationId, int ca) = 0;
