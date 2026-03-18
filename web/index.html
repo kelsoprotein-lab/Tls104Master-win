@@ -322,6 +322,12 @@
                 <el-form-item label="TLS">
                     <el-switch v-model="newStation.use_tls"></el-switch>
                 </el-form-item>
+                <el-form-item label="TLS版本" v-if="newStation.use_tls">
+                    <el-select v-model="newStation.tls_version" style="width: 120px;">
+                        <el-option label="TLS 1.2" value="1.2"></el-option>
+                        <el-option label="TLS 1.3" value="1.3"></el-option>
+                    </el-select>
+                </el-form-item>
                 <el-form-item label="CA证书" v-if="newStation.use_tls">
                     <el-input v-model="newStation.ca_file" placeholder="E:/OneDrive/桌面/cert_demo/ca/ca-cert.pem"></el-input>
                 </el-form-item>
@@ -1082,6 +1088,7 @@
                     port: 2404,
                     ca: 1,
                     use_tls: false,
+                    tls_version: '1.2',
                     ca_file: 'F:/cert_demo/ca/ca-cert.pem',
                     cert_file: 'F:/cert_demo/master/master-cert.pem',
                     key_file: 'F:/cert_demo/master/master-key.pem'
@@ -1273,6 +1280,7 @@
                                         host: data.host,
                                         port: data.port,
                                         use_tls: data.use_tls || false,
+                                        tls_version: data.tls_version || '1.2',
                                         ca_file: data.ca_file || '',
                                         cert_file: data.cert_file || '',
                                         key_file: data.key_file || ''
@@ -1338,6 +1346,7 @@
                         host: newStation.value.host,
                         port: newStation.value.port,
                         use_tls: newStation.value.use_tls,
+                        tls_version: newStation.value.tls_version || '1.2',
                         ca_file: newStation.value.ca_file || '',
                         cert_file: newStation.value.cert_file || '',
                         key_file: newStation.value.key_file || '',

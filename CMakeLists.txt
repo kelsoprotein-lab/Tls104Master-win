@@ -21,14 +21,6 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 # Find packages
 find_package(Threads REQUIRED)
 
-# mbedtls include path (if installed)
-if(WIN32)
-    set(MBEDTLS_INCLUDE "C:/Program Files (x86)/Mbed TLS/include")
-    if(EXISTS ${MBEDTLS_INCLUDE})
-        message(STATUS "Found mbedtls at: ${MBEDTLS_INCLUDE}")
-    endif()
-endif()
-
 # WebView2 (Windows only)
 if(WIN32)
     # Try to find WebView2 package
@@ -43,13 +35,8 @@ set(BUILD_HAL ON CACHE BOOL "Build HAL" FORCE)
 set(BUILD_COMMON ON CACHE BOOL "Build common code" FORCE)
 set(BUILD_EXAMPLES OFF CACHE BOOL "Build examples" FORCE)
 set(BUILD_TESTS OFF CACHE BOOL "Build tests" FORCE)
-set(WITH_MBEDTLS ON CACHE BOOL "Enable mbedTLS support" FORCE)
 
-# mbedtls paths - set BEFORE fetching lib60870
-set(MBEDTLS_ROOT "C:/Program Files (x86)/Mbed TLS")
-set(CMAKE_INCLUDE_PATH "${MBEDTLS_ROOT}/include;${CMAKE_INCLUDE_PATH}")
-
-# Download lib60870
+# Download lib60870 (populate only, build after mbedtls setup)
 include(FetchContent)
 FetchContent_Declare(
     lib60870
@@ -57,7 +44,31 @@ FetchContent_Declare(
     GIT_TAG master
 )
 set(FETCHCONTENT_UPDATES_DISCONNECTED TRUE)
-FetchContent_MakeAvailable(lib60870)
+FetchContent_GetProperties(lib60870)
+if(NOT lib60870_POPULATED)
+    FetchContent_Populate(lib60870)
+endif()
+
+# Upgrade to mbedtls 3.6 for TLS 1.2/1.3 support
+set(LIB60870_DEPS "${lib60870_SOURCE_DIR}/lib60870-C/dependencies")
+if(NOT EXISTS "${LIB60870_DEPS}/mbedtls-3.6.2")
+    message(STATUS "Downloading mbedtls 3.6.2 for TLS 1.3 support...")
+    FetchContent_Declare(
+        mbedtls3
+        URL https://github.com/Mbed-TLS/mbedtls/archive/refs/tags/v3.6.2.tar.gz
+    )
+    FetchContent_GetProperties(mbedtls3)
+    if(NOT mbedtls3_POPULATED)
+        FetchContent_Populate(mbedtls3)
+    endif()
+    execute_process(COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${mbedtls3_SOURCE_DIR}" "${LIB60870_DEPS}/mbedtls-3.6.2")
+    # Remove old mbedtls-2.28 so lib60870 auto-detects 3.6
+    if(EXISTS "${LIB60870_DEPS}/mbedtls-2.28")
+        execute_process(COMMAND ${CMAKE_COMMAND} -E rename
+            "${LIB60870_DEPS}/mbedtls-2.28" "${LIB60870_DEPS}/_mbedtls-2.28.old")
+    endif()
+endif()
 
 add_subdirectory(${lib60870_SOURCE_DIR}/lib60870-C ${CMAKE_BINARY_DIR}/lib60870-C-build)
 

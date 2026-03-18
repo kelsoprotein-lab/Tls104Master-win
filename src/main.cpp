@@ -211,6 +211,18 @@ std::string handleAPIRequest(const std::string& path, const std::string& method,
             }
         }
 
+        // Extract tls_version
+        std::string tls_version = "1.2";
+        size_t tlsVerPos = body.find("\"tls_version\"");
+        if (tlsVerPos != std::string::npos) {
+            size_t colon = body.find(":", tlsVerPos);
+            size_t q1 = body.find("\"", colon);
+            size_t q2 = body.find("\"", q1 + 1);
+            if (q1 != std::string::npos && q2 != std::string::npos) {
+                tls_version = body.substr(q1 + 1, q2 - q1 - 1);
+            }
+        }
+
         // Create station config
         StationConfig config;
         config.id = host + ":" + std::to_string(port);
@@ -220,6 +232,7 @@ std::string handleAPIRequest(const std::string& path, const std::string& method,
         config.caFile = ca_file;
         config.certFile = cert_file;
         config.keyFile = key_file;
+        config.tlsVersion = tls_version;
 
         // Notify callback
         if (g_appCallback) {

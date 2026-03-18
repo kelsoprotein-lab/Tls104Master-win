@@ -50,6 +50,7 @@ struct IEC104ConnectionInfo {
     std::string certFile;
     std::string keyFile;
     int commonAddress;
+    std::string tlsVersion;  // "1.2" or "1.3"
     ConnectionStatus status;
     std::atomic<bool> shouldReconnect;
     std::unique_ptr<std::thread> reconnectThread;

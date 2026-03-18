@@ -101,6 +101,7 @@ bool IEC104ConnectionManager::addStation(const StationConfig& config) {
     info->certFile = config.certFile;
     info->keyFile = config.keyFile;
     info->commonAddress = config.commonAddress > 0 ? config.commonAddress : 1;
+    info->tlsVersion = config.tlsVersion.empty() ? "1.2" : config.tlsVersion;
     info->status = ConnectionStatus::CONNECTING;
     info->shouldReconnect = true;
     info->holder = this;  // Store manager pointer
@@ -277,6 +278,15 @@ CS104_Connection IEC104ConnectionManager::createConnection(IEC104ConnectionInfo&
         // Create TLS configuration (stored in info so it can be properly destroyed later)
         info.tlsConfig = TLSConfiguration_create();
         TLSConfiguration_setClientMode(info.tlsConfig);
+
+        // Set TLS version (IEC 62351 requires TLS 1.2+)
+        if (info.tlsVersion == "1.3") {
+            TLSConfiguration_setMinTlsVersion(info.tlsConfig, TLS_VERSION_TLS_1_3);
+            std::cout << "[IEC104] TLS version set to 1.3" << std::endl;
+        } else {
+            TLSConfiguration_setMinTlsVersion(info.tlsConfig, TLS_VERSION_TLS_1_2);
+            std::cout << "[IEC104] TLS version set to 1.2" << std::endl;
+        }
 
         // Set TLS event handler for detailed debugging
         auto tlsEventHandler = [](void* param, TLSEventLevel level, int eventCode, const char* message, TLSConnection con) {

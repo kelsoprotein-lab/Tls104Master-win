@@ -44,6 +44,7 @@ struct StationConfig {
     std::string certFile;
     std::string keyFile;
     int commonAddress;        // CA
+    std::string tlsVersion;  // "1.2" or "1.3", default "1.2"
 };
 
 /**
