@@ -99,6 +99,7 @@ target_link_libraries(tls104_master_win PRIVATE
 
 # Windows-specific libraries
 if(WIN32)
+    target_link_options(tls104_master_win PRIVATE -static)
     target_link_libraries(tls104_master_win PRIVATE ws2_32)
     target_compile_definitions(tls104_master_win PRIVATE _WIN32=1)
 
