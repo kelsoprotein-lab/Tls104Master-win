@@ -6,20 +6,8 @@ on:
       - 'v*'
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-            artifact_name: tls104_master_win-macos
-            cmake_gen: "Unix Makefiles"
-          - os: windows-latest
-            artifact_name: tls104_master_win-windows
-            cmake_gen: "Visual Studio 17 2022"
-
-    runs-on: ${{ matrix.os }}
-
+  build-macos:
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,7 +16,7 @@ jobs:
         run: |
           mkdir build
           cd build
-          cmake .. -G "${{ matrix.cmake_gen }}" -A x64 -DCMAKE_BUILD_TYPE=Release
+          cmake .. -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: |
@@ -37,32 +25,56 @@ jobs:
       - name: Package
         run: |
           cd build
-          if [[ "${{ matrix.os }}" == "macos-latest" ]]; then
-            mkdir -p dist
-            cp tls104_master_win dist/
-            cp -r ../certs dist/
-            tar -czf ../${{ matrix.artifact_name }}.tar.gz -C dist .
-          else
-            mkdir -p dist
-            find . -name "*.exe" -path "*/Release/*" -exec cp {} dist/ \; 2>/dev/null || true
-            if ls dist/*.exe 1> /dev/null 2>&1; then
-              cp -r ../certs dist/ 2>/dev/null || true
-              powershell -Command "Compress-Archive -Path 'dist\\*' -DestinationPath '..\\${{ matrix.artifact_name }}.zip' -Force"
-            else
-              echo "No exe found, checking build output..."
-              find . -name "*.exe" -o -name "tls104_master_win*" 2>/dev/null
-            fi
-          fi
+          mkdir -p dist
+          cp tls104_master_win dist/
+          cp -r ../certs dist/
+          tar -czf ../tls104_master_win-macos.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact_name }}
-          path: ${{ matrix.artifact_name }}.*
+          name: tls104_master_win-macos
+          path: tls104_master_win-macos.tar.gz
+          retention-days: 5
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        shell: bash
+        run: |
+          mkdir build
+          cd build
+          cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: bash
+        run: |
+          cd build
+          mkdir -p dist
+          cp build/Release/tls104_master_win.exe dist/ 2>/dev/null || cp build/tls104_master_win.exe dist/ 2>/dev/null || true
+          ls -la dist/ || dir dist/
+          cp -r ../certs dist/ 2>/dev/null || true
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls104_master_win-windows
+          path: |
+            build/dist/tls104_master_win.exe
+            build/dist/certs/*
           retention-days: 5
 
   release:
-    needs: build
+    needs: [build-macos, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
