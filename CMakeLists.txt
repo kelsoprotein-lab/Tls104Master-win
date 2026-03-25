@@ -5,6 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+option(ENABLE_WEBVIEW_GUI "Build with native webview window support" OFF)
+
 # Windows-specific settings
 if(WIN32)
     add_definitions(-D_WIN32_WINNT=0x0601)
@@ -20,15 +22,6 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 
 # Find packages
 find_package(Threads REQUIRED)
-
-# WebView2 (Windows only)
-if(WIN32)
-    # Try to find WebView2 package
-    find_package(WebView2 QUIET)
-    if(NOT WebView2_FOUND)
-        message(STATUS "WebView2 not found, will download on first build")
-    endif()
-endif()
 
 # lib60870 configuration
 set(BUILD_HAL ON CACHE BOOL "Build HAL" FORCE)
@@ -70,7 +63,40 @@ if(NOT EXISTS "${LIB60870_DEPS}/mbedtls-3.6.2")
     endif()
 endif()
 
+# macOS fix: lib60870's CMakeLists.txt unconditionally adds -lrt for UNIX,
+# but macOS doesn't have the 'rt' library. Remove -lrt for APPLE.
+if(APPLE)
+    # Patch lib60870/src/CMakeLists.txt
+    set(LIB60870_SRC_CMAKE "${lib60870_SOURCE_DIR}/lib60870-C/src/CMakeLists.txt")
+    if(EXISTS "${LIB60870_SRC_CMAKE}")
+        file(READ "${LIB60870_SRC_CMAKE}" _content)
+        # Remove "    -lrt" line from the IF(UNIX) block in lib60870
+        string(REPLACE "\n        -lrt" "\n" _content "${_content}")
+        file(WRITE "${LIB60870_SRC_CMAKE}" "${_content}")
+        message(STATUS "Patched: removed -lrt from ${LIB60870_SRC_CMAKE}")
+    endif()
+
+    # Patch lib60870/src/hal/CMakeLists.txt
+    set(LIB60870_HAL_CMAKE "${lib60870_SOURCE_DIR}/lib60870-C/src/hal/CMakeLists.txt")
+    if(EXISTS "${LIB60870_HAL_CMAKE}")
+        file(READ "${LIB60870_HAL_CMAKE}" _content)
+        string(REPLACE "\n        -lrt" "\n" _content "${_content}")
+        file(WRITE "${LIB60870_HAL_CMAKE}" "${_content}")
+        message(STATUS "Patched: removed -lrt from ${LIB60870_HAL_CMAKE}")
+    endif()
+endif()
+
 add_subdirectory(${lib60870_SOURCE_DIR}/lib60870-C ${CMAKE_BINARY_DIR}/lib60870-C-build)
+
+# Optional: webview for native GUI window
+if(ENABLE_WEBVIEW_GUI)
+    FetchContent_Declare(
+        webview
+        GIT_REPOSITORY https://github.com/webview/webview.git
+        GIT_TAG 0.12.0
+    )
+    FetchContent_MakeAvailable(webview)
+endif()
 
 # Source files
 set(SOURCES
@@ -88,6 +114,11 @@ set(HEADERS
     src/http/server.h
     src/iec104/connection.h
 )
+
+if(ENABLE_WEBVIEW_GUI)
+    list(APPEND SOURCES src/gui/webview_window.cpp)
+    list(APPEND HEADERS src/gui/webview_window.h)
+endif()
 
 # Create executable
 add_executable(tls104_master_win ${SOURCES} ${HEADERS})
@@ -113,14 +144,23 @@ if(WIN32)
     target_link_options(tls104_master_win PRIVATE -static)
     target_link_libraries(tls104_master_win PRIVATE ws2_32)
     target_compile_definitions(tls104_master_win PRIVATE _WIN32=1)
-
-    # WebView2
-    if(WebView2_FOUND)
-        target_link_libraries(tls104_master_win PRIVATE ${WEBVIEW2_LIB})
-        target_include_directories(tls104_master_win PRIVATE ${WEBVIEW2_INCLUDE_DIR})
-    endif()
 else()
     target_link_libraries(tls104_master_win PRIVATE dl)
+endif()
+
+# Optional native GUI via webview
+if(ENABLE_WEBVIEW_GUI)
+    target_link_libraries(tls104_master_win PRIVATE webview::core)
+    target_compile_definitions(tls104_master_win PRIVATE ENABLE_WEBVIEW_GUI=1)
+
+    # Linux: need GTK3 and WebKit2GTK
+    if(UNIX AND NOT APPLE)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(GTK3 REQUIRED gtk+-3.0)
+        pkg_check_modules(WEBKIT REQUIRED webkit2gtk-4.0)
+        target_include_directories(tls104_master_win PRIVATE ${GTK3_INCLUDE_DIRS} ${WEBKIT_INCLUDE_DIRS})
+        target_link_libraries(tls104_master_win PRIVATE ${GTK3_LIBRARIES} ${WEBKIT_LIBRARIES})
+    endif()
 endif()
 
 # Force TLS support

@@ -1,6 +1,6 @@
 /**
  * @file main.cpp
- * @brief TLS104 Master - Windows Desktop Edition
+ * @brief TLS104 Master - Cross-Platform Edition
  * @brief Main entry point with IEC104 and HTTP server
  */
 
@@ -29,6 +29,10 @@
 #include "ipc/bridge.h"
 #include "http/server.h"
 #include "iec104/connection.h"
+
+#ifdef ENABLE_WEBVIEW_GUI
+#include "gui/webview_window.h"
+#endif
 
 namespace tls104 {
 
@@ -455,7 +459,7 @@ int main(int argc, char* argv[]) {
     using namespace tls104;
 
     std::cout << "======================================" << std::endl;
-    std::cout << "  TLS104 Master - Windows Desktop" << std::endl;
+    std::cout << "  TLS104 Master" << std::endl;
     std::cout << "  Mode: HTTP Server + IEC104" << std::endl;
     std::cout << "======================================" << std::endl;
 
@@ -466,21 +470,35 @@ int main(int argc, char* argv[]) {
     // Parse arguments
     int httpPort = 19876;
     bool openBrowser = true;
+    bool useNativeGui = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) {
             httpPort = std::stoi(argv[++i]);
         } else if (strcmp(argv[i], "--no-browser") == 0) {
             openBrowser = false;
+        } else if (strcmp(argv[i], "--gui") == 0) {
+            useNativeGui = true;
+            openBrowser = false;
         } else if (strcmp(argv[i], "--help") == 0) {
             std::cout << "Usage: tls104_master_win [options]" << std::endl;
             std::cout << "Options:" << std::endl;
             std::cout << "  -p <port>        HTTP server port (default: 19876)" << std::endl;
             std::cout << "  --no-browser     Do not open browser on startup" << std::endl;
+#ifdef ENABLE_WEBVIEW_GUI
+            std::cout << "  --gui            Launch in native window mode" << std::endl;
+#endif
             std::cout << "  --help           Show this help" << std::endl;
             return 0;
         }
     }
+
+#ifndef ENABLE_WEBVIEW_GUI
+    if (useNativeGui) {
+        std::cerr << "[Main] Error: --gui requires building with -DENABLE_WEBVIEW_GUI=ON" << std::endl;
+        return 1;
+    }
+#endif
 
     // Initialize IPC Bridge (not used in this mode, but kept for compatibility)
     std::cout << "[Main] Initializing IPC Bridge..." << std::endl;
@@ -602,18 +620,39 @@ int main(int argc, char* argv[]) {
     std::string url = "http://localhost:" + std::to_string(httpPort);
     std::cout << "[Main] Open browser at: " << url << std::endl;
 
+#ifdef ENABLE_WEBVIEW_GUI
+    if (useNativeGui) {
+        std::cout << "[Main] Launching native GUI window..." << std::endl;
+        tls104::runWebviewWindow("IEC 104 Master", url, 1280, 800);
+        g_running = false;
+    } else {
+#endif
+        // Cross-platform browser auto-open
 #ifdef _WIN32
-    if (openBrowser) {
-        ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-    }
+        if (openBrowser) {
+            ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+#elif defined(__APPLE__)
+        if (openBrowser) {
+            std::string cmd = "open " + url;
+            system(cmd.c_str());
+        }
+#else
+        if (openBrowser) {
+            std::string cmd = "xdg-open " + url;
+            system(cmd.c_str());
+        }
 #endif
 
-    std::cout << "[Main] Ready! Press Ctrl+C to exit" << std::endl;
+        std::cout << "[Main] Ready! Press Ctrl+C to exit" << std::endl;
 
-    // Main loop
-    while (g_running) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        // Main loop
+        while (g_running) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+#ifdef ENABLE_WEBVIEW_GUI
     }
+#endif
 
     // Cleanup
     std::cout << "[Main] Cleaning up..." << std::endl;

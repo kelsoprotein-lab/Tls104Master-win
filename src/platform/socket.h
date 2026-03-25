@@ -18,6 +18,13 @@
     #define SOCKET_INVALID INVALID_SOCKET
     #define SOCKET_CLOSE closesocket
 #else
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <netdb.h>
+    #include <unistd.h>
+    #include <fcntl.h>
     typedef int SocketType;
     #define SOCKET_INVALID (-1)
     #define SOCKET_CLOSE close
