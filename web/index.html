@@ -673,6 +673,7 @@
             'M_ME_NC_1': { name: '短浮点数', code: 13 },
             'M_ME_TC_1': { name: '带短时标短浮点数', code: 14 },
             'M_IT_NA_1': { name: '累积量', code: 15 },
+            'M_IT_TA_1': { name: '带短时标累积量', code: 16 },
             'M_ME_ND_1': { name: '不带品质规一化值', code: 21 },
             'M_SP_TB_1': { name: '带长时标单点遥信', code: 30 },
             'M_DP_TB_1': { name: '带长时标双点遥信', code: 31 },
@@ -680,6 +681,7 @@
             'M_ME_TE_1': { name: '带长时标标度化值', code: 35 },
             'M_ME_TF_1': { name: '带长时标短浮点数', code: 36 },
             'M_IT_TB_1': { name: '带长时标累积量', code: 37 },
+            'S_IT_TC_1': { name: '安全统计累积量', code: 41 },
         };
 
         // 获取类型显示名称
@@ -936,6 +938,7 @@
                         switch (msg.type) {
                             case 'telemetry':
                             case 'digital':
+                            case 'counter':
                                 msg.data.objects.forEach(obj => {
                                     obj.timestamp = new Date().toLocaleString();
                                     obj.station_id = msg.station_id;
@@ -949,6 +952,9 @@
                                         point.type = obj.type;
                                         point.quality = obj.quality;
                                         point.timestamp = obj.timestamp;
+                                        // counter 特有字段
+                                        if (obj.carry !== undefined) point.carry = obj.carry;
+                                        if (obj.sequenceNumber !== undefined) point.sequenceNumber = obj.sequenceNumber;
                                     } else {
                                         currentMap[key] = { ...obj, id: key };
                                         hasNewPoint = true;

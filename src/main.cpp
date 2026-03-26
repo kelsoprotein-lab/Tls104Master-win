@@ -565,6 +565,85 @@ int main(int argc, char* argv[]) {
         }
     });
 
+    // Set up ASDU data callback - includes counter (遥脉/累积量), step, bitstring, protection
+    g_iec104->setASDUDataCallback([](const std::string& stationId,
+                                     const std::vector<DigitalPointData>& digital,
+                                     const std::vector<TelemetryPointData>& telemetry,
+                                     const std::vector<StepPositionData>& step,
+                                     const std::vector<BitstringData>& bitstring,
+                                     const std::vector<CounterPointData>& counter,
+                                     const std::vector<ProtectionEventData>& protection) {
+        if (!g_httpServer) return;
+
+        // Send digital data
+        for (const auto& p : digital) {
+            std::ostringstream json;
+            json << "{\"type\":\"digital\",\"station_id\":\"" << stationId << "\","
+                 << "\"data\":{\"objects\":[{\"ioa\":" << p.ioa
+                 << ",\"type\":\"" << p.type
+                 << "\",\"value\":" << p.value
+                 << ",\"quality\":" << p.quality << "}]}}";
+            g_httpServer->broadcast(json.str());
+        }
+
+        // Send telemetry data
+        for (const auto& p : telemetry) {
+            std::ostringstream json;
+            json << "{\"type\":\"telemetry\",\"station_id\":\"" << stationId << "\","
+                 << "\"data\":{\"objects\":[{\"ioa\":" << p.ioa
+                 << ",\"type\":\"" << p.type
+                 << "\",\"value\":" << p.value
+                 << ",\"quality\":" << p.quality << "}]}}";
+            g_httpServer->broadcast(json.str());
+        }
+
+        // Send counter data (累积量/遥脉)
+        for (const auto& p : counter) {
+            std::ostringstream json;
+            json << "{\"type\":\"counter\",\"station_id\":\"" << stationId << "\","
+                 << "\"data\":{\"objects\":[{\"ioa\":" << p.ioa
+                 << ",\"type\":\"" << p.type
+                 << "\",\"value\":" << p.value
+                 << ",\"quality\":" << p.quality
+                 << ",\"carry\":" << (p.carry ? "true" : "false")
+                 << ",\"sequenceNumber\":" << p.sequenceNumber << "}]}}";
+            g_httpServer->broadcast(json.str());
+        }
+
+        // Send step position data
+        for (const auto& p : step) {
+            std::ostringstream json;
+            json << "{\"type\":\"telemetry\",\"station_id\":\"" << stationId << "\","
+                 << "\"data\":{\"objects\":[{\"ioa\":" << p.ioa
+                 << ",\"type\":\"" << p.type
+                 << "\",\"value\":" << p.value
+                 << ",\"quality\":" << p.quality << "}]}}";
+            g_httpServer->broadcast(json.str());
+        }
+
+        // Send bitstring data
+        for (const auto& p : bitstring) {
+            std::ostringstream json;
+            json << "{\"type\":\"telemetry\",\"station_id\":\"" << stationId << "\","
+                 << "\"data\":{\"objects\":[{\"ioa\":" << p.ioa
+                 << ",\"type\":\"" << p.type
+                 << "\",\"value\":" << p.value
+                 << ",\"quality\":" << p.quality << "}]}}";
+            g_httpServer->broadcast(json.str());
+        }
+
+        // Send protection event data
+        for (const auto& p : protection) {
+            std::ostringstream json;
+            json << "{\"type\":\"telemetry\",\"station_id\":\"" << stationId << "\","
+                 << "\"data\":{\"objects\":[{\"ioa\":" << p.ioa
+                 << ",\"type\":\"" << p.type
+                 << ",\"value\":" << p.eventType
+                 << ",\"quality\":0}]}}";
+            g_httpServer->broadcast(json.str());
+        }
+    });
+
     // Set up packet callback - forward raw bytes to frontend via SSE
     g_iec104->setPacketCallback([](const std::string& stationId, bool sent, const std::vector<uint8_t>& data) {
         if (!g_httpServer) return;
