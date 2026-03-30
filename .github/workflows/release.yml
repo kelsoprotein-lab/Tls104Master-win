@@ -38,6 +38,38 @@ jobs:
           path: tls104_master_win-macos.tar.gz
           retention-days: 5
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          mkdir build
+          cd build
+          cmake .. -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: |
+          cmake --build build --config Release --parallel
+
+      - name: Package
+        run: |
+          cd build
+          mkdir -p dist
+          cp tls104_master_win dist/
+          cp -r ../certs dist/
+          tar -czf ../tls104_master_win-linux.tar.gz -C dist .
+          ls -la ../tls104_master_win-linux.tar.gz
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tls104_master_win-linux
+          path: tls104_master_win-linux.tar.gz
+          retention-days: 5
+
   build-windows:
     runs-on: windows-latest
     steps:
@@ -76,7 +108,7 @@ jobs:
           retention-days: 5
 
   release:
-    needs: [build-macos, build-windows]
+    needs: [build-macos, build-linux, build-windows]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -100,6 +132,7 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/tls104_master_win-macos.tar.gz
+            artifacts/tls104_master_win-linux.tar.gz
             artifacts/tls104_master_win-windows.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

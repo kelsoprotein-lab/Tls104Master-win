@@ -1,6 +1,6 @@
 # Tls104Master-win
 
-跨平台 IEC 60870-5-104 主站，基于 C++ + WebView2 实现。支持 Windows 和 macOS。
+跨平台 IEC 60870-5-104 主站，基于 C++ + WebView2 实现。支持 Windows、macOS 和 Linux。
 
 ## 功能特性
 
@@ -31,6 +31,14 @@
 - lib60870 依赖
 - mbedTLS (可选，用于 TLS 支持)
 
+### Linux
+- Ubuntu 20.04+ / Debian 11+ / Fedora 35+ 或其他主流 Linux 发行版
+- CMake >= 3.14
+- C++17 编译器 (GCC >= 7 或 Clang >= 5)
+- lib60870 依赖（自动下载）
+- mbedTLS（自动下载，用于 TLS 支持）
+- 可选 GUI: libgtk-3-dev, libwebkit2gtk-4.0-dev
+
 ## 构建步骤
 
 ### 1. 安装依赖
@@ -50,6 +58,25 @@
 brew install cmake
 ```
 
+**Linux (Ubuntu/Debian):**
+```bash
+# 安装编译工具和 CMake
+sudo apt-get update
+sudo apt-get install -y cmake build-essential
+
+# 可选：安装 GUI 依赖
+# sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev
+```
+
+**Linux (Fedora/RHEL):**
+```bash
+# 安装编译工具和 CMake
+sudo dnf install cmake gcc-c++ make
+
+# 可选：安装 GUI 依赖
+# sudo dnf install gtk3-devel webkit2gtk4.0-devel
+```
+
 ### 2. 编译
 
 ```bash
@@ -65,6 +92,9 @@ cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
 
 # 配置 (macOS)
 cmake .. -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+# 配置 (Linux)
+cmake .. -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release
 
 # 编译
 cmake --build . --config Release
@@ -92,6 +122,18 @@ cmake --build . --config Release
 ```bash
 ./tls104_master_win --gui
 ```
+
+## 下载
+
+预编译的可执行文件可从 [GitHub Releases](../../releases/latest) 页面下载：
+
+| 平台 | 文件 |
+|------|------|
+| Windows (x64) | `tls104_master_win-windows.zip` |
+| macOS | `tls104_master_win-macos.tar.gz` |
+| Linux (x64) | `tls104_master_win-linux.tar.gz` |
+
+下载后解压即可运行，无需安装。
 
 ## 使用方法
 
