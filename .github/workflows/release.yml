@@ -29,14 +29,13 @@ jobs:
           cp tls104_master_win dist/
           cp -r ../certs dist/
           file dist/tls104_master_win
-          tar -czf ../tls104_master_win-macos-universal.tar.gz -C dist .
-          ls -la ../tls104_master_win-macos-universal.tar.gz
+          tar -czf ../tls104_master_win-${GITHUB_REF_NAME}-macos-universal.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tls104_master_win-macos-universal
-          path: tls104_master_win-macos-universal.tar.gz
+          name: macos-universal
+          path: tls104_master_win-${{ github.ref_name }}-macos-universal.tar.gz
           retention-days: 5
 
   build-linux-amd64:
@@ -61,14 +60,13 @@ jobs:
           mkdir -p dist
           cp tls104_master_win dist/
           cp -r ../certs dist/
-          tar -czf ../tls104_master_win-linux-amd64.tar.gz -C dist .
-          ls -la ../tls104_master_win-linux-amd64.tar.gz
+          tar -czf ../tls104_master_win-${GITHUB_REF_NAME}-linux-amd64.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tls104_master_win-linux-amd64
-          path: tls104_master_win-linux-amd64.tar.gz
+          name: linux-amd64
+          path: tls104_master_win-${{ github.ref_name }}-linux-amd64.tar.gz
           retention-days: 5
 
   build-linux-arm64:
@@ -93,14 +91,13 @@ jobs:
           mkdir -p dist
           cp tls104_master_win dist/
           cp -r ../certs dist/
-          tar -czf ../tls104_master_win-linux-arm64.tar.gz -C dist .
-          ls -la ../tls104_master_win-linux-arm64.tar.gz
+          tar -czf ../tls104_master_win-${GITHUB_REF_NAME}-linux-arm64.tar.gz -C dist .
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tls104_master_win-linux-arm64
-          path: tls104_master_win-linux-arm64.tar.gz
+          name: linux-arm64
+          path: tls104_master_win-${{ github.ref_name }}-linux-arm64.tar.gz
           retention-days: 5
 
   build-windows:
@@ -128,16 +125,14 @@ jobs:
           mkdir -p dist
           cp build/Release/tls104_master_win.exe dist/ 2>/dev/null || echo "Exe not found"
           cp -r certs dist/ 2>/dev/null || echo "certs not copied"
-          ls -la dist/ || dir dist
           cd dist
-          powershell -Command "Compress-Archive -Path '*' -DestinationPath '../tls104_master_win-windows-x64.zip' -Force"
-          ls -la ../tls104_master_win-windows-x64.zip || dir ../tls104_master_win-windows-x64.zip
+          powershell -Command "Compress-Archive -Path '*' -DestinationPath '../tls104_master_win-${GITHUB_REF_NAME}-windows-x64.zip' -Force"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tls104_master_win-windows-x64
-          path: tls104_master_win-windows-x64.zip
+          name: windows-x64
+          path: tls104_master_win-${{ github.ref_name }}-windows-x64.zip
           retention-days: 5
 
   release:
@@ -164,9 +159,9 @@ jobs:
           prerelease: false
           generate_release_notes: true
           files: |
-            artifacts/tls104_master_win-macos-universal.tar.gz
-            artifacts/tls104_master_win-linux-amd64.tar.gz
-            artifacts/tls104_master_win-linux-arm64.tar.gz
-            artifacts/tls104_master_win-windows-x64.zip
+            artifacts/tls104_master_win-${{ github.ref_name }}-macos-universal.tar.gz
+            artifacts/tls104_master_win-${{ github.ref_name }}-linux-amd64.tar.gz
+            artifacts/tls104_master_win-${{ github.ref_name }}-linux-arm64.tar.gz
+            artifacts/tls104_master_win-${{ github.ref_name }}-windows-x64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

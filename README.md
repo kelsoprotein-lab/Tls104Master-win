@@ -129,12 +129,12 @@ cmake --build . --config Release
 
 | 平台 | 架构 | 文件 |
 |------|------|------|
-| Windows | x64 | `tls104_master_win-windows-x64.zip` |
-| macOS | Universal (arm64 + x86_64) | `tls104_master_win-macos-universal.tar.gz` |
-| Linux | amd64 | `tls104_master_win-linux-amd64.tar.gz` |
-| Linux | arm64 | `tls104_master_win-linux-arm64.tar.gz` |
+| Windows | x64 | `tls104_master_win-<version>-windows-x64.zip` |
+| macOS | Universal (arm64 + x86_64) | `tls104_master_win-<version>-macos-universal.tar.gz` |
+| Linux | amd64 | `tls104_master_win-<version>-linux-amd64.tar.gz` |
+| Linux | arm64 | `tls104_master_win-<version>-linux-arm64.tar.gz` |
 
-下载后解压即可运行，无需安装。
+其中 `<version>` 为版本号，如 `v1.0.13`。下载后解压即可运行，无需安装。
 
 ## 使用方法
 
